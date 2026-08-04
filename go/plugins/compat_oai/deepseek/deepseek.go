@@ -30,10 +30,9 @@ import (
 )
 
 // chatCompletionConfig describes the schema accepted by DeepSeek chat
-// completions. MaxTokens is DeepSeek's provider-specific output token limit.
+// completions.
 type chatCompletionConfig struct {
 	ai.GenerationCommonConfig
-	MaxTokens        *int     `json:"maxTokens,omitempty" jsonschema:"minimum=1,maximum=8192"`
 	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty" jsonschema:"minimum=-2,maximum=2"`
 	LogProbs         *bool    `json:"logProbs,omitempty"`
 	PresencePenalty  *float64 `json:"presencePenalty,omitempty" jsonschema:"minimum=-2,maximum=2"`
@@ -115,7 +114,7 @@ func (d *DeepSeek) Init(ctx context.Context) []api.Action {
 
 	d.openAICompatible.Provider = provider
 	d.openAICompatible.ConfigAliases = map[string]string{
-		"maxTokens": "max_tokens",
+		"maxOutputTokens": "max_tokens",
 	}
 	d.openAICompatible.Opts = opts
 	actions := d.openAICompatible.Init(ctx)

@@ -120,15 +120,11 @@ func TestPluginRegistersModelsAndHandlesReasoning(t *testing.T) {
 		}
 		configSchema := metadata["customOptions"].(map[string]any)
 		properties := configSchema["properties"].(map[string]any)
-		maxTokens := properties["maxTokens"].(map[string]any)
-		if got := maxTokens["minimum"]; got != float64(1) {
-			t.Errorf("%s maxTokens minimum = %v, want 1", modelName, got)
-		}
-		if got := maxTokens["maximum"]; got != float64(8192) {
-			t.Errorf("%s maxTokens maximum = %v, want 8192", modelName, got)
+		if _, ok := properties["maxOutputTokens"]; !ok {
+			t.Errorf("%s customOptions does not contain maxOutputTokens", modelName)
 		}
 	}
-	config := map[string]any{"maxTokens": 8192}
+	config := map[string]any{"maxOutputTokens": 8192}
 
 	t.Run("complete", func(t *testing.T) {
 		resp, err := genkit.Generate(ctx, g, ai.WithPrompt("Solve this."), ai.WithConfig(config))
@@ -231,7 +227,7 @@ func assertDeepSeekMetadata(t *testing.T, desc api.ActionDesc) {
 		t.Errorf("tools support = %v, want true", got)
 	}
 	properties := metadata["customOptions"].(map[string]any)["properties"].(map[string]any)
-	if _, ok := properties["maxTokens"]; !ok {
-		t.Error("customOptions does not contain maxTokens")
+	if _, ok := properties["maxOutputTokens"]; !ok {
+		t.Error("customOptions does not contain maxOutputTokens")
 	}
 }

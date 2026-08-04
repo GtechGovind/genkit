@@ -34,15 +34,15 @@ g := genkit.Init(
 response, err := genkit.Generate(ctx, g, ai.WithPrompt("Explain mixture-of-experts models."))
 ```
 
-DeepSeek's `maxTokens` option accepts values from 1 through 8192 and is sent
-to the API as `max_tokens`:
+Genkit's standard `maxOutputTokens` option is sent to the DeepSeek API as
+`max_tokens`:
 
 ```go
 response, err := genkit.Generate(
     ctx,
     g,
     ai.WithPrompt("Answer concisely."),
-    ai.WithConfig(map[string]any{"maxTokens": 1024}),
+    ai.WithConfig(map[string]any{"maxOutputTokens": 1024}),
 )
 ```
 
