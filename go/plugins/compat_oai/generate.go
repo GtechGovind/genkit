@@ -36,8 +36,17 @@ type ModelGenerator struct {
 	request   *openai.ChatCompletionNewParams
 	messages  []openai.ChatCompletionMessageParamUnion
 	tools     []openai.ChatCompletionToolParam
+	// configAliases contains provider-specific config name translations.
+	configAliases map[string]string
 	// Store any errors that occur during building
 	err error
+}
+
+// WithConfigAliases configures provider-specific translations from
+// Genkit-facing config names to OpenAI-compatible request field names.
+func (g *ModelGenerator) WithConfigAliases(aliases map[string]string) *ModelGenerator {
+	g.configAliases = aliases
+	return g
 }
 
 // chatCompletionParamFields contains every field serialized by the OpenAI SDK.
@@ -187,6 +196,7 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		openaiConfig = *cfg
 	case map[string]any:
 		normalizedConfig := make(map[string]any, len(cfg))
+		providerFields := make(map[string]struct{}, len(g.configAliases))
 		for key, value := range cfg {
 			normalizedConfig[key] = value
 		}
@@ -201,6 +211,13 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 			if value, ok := normalizedConfig[source]; ok {
 				normalizedConfig[target] = value
 				delete(normalizedConfig, source)
+			}
+		}
+		for source, target := range g.configAliases {
+			if value, ok := normalizedConfig[source]; ok {
+				normalizedConfig[target] = value
+				delete(normalizedConfig, source)
+				providerFields[target] = struct{}{}
 			}
 		}
 		// These Genkit common fields are handled outside the provider request
@@ -223,7 +240,8 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		// are excluded to prevent config from overriding request construction.
 		extraFields := make(map[string]any, len(normalizedConfig))
 		for key, value := range normalizedConfig {
-			if _, standard := chatCompletionParamFields[key]; standard {
+			_, providerField := providerFields[key]
+			if _, standard := chatCompletionParamFields[key]; standard && !providerField {
 				continue
 			}
 			extraFields[key] = value

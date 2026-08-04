@@ -278,6 +278,49 @@ func TestWithConfigPreservesProviderSpecificFields(t *testing.T) {
 	}
 }
 
+func TestWithConfigAppliesProviderAliases(t *testing.T) {
+	g := newGen().
+		WithConfigAliases(map[string]string{
+			"reasoningEffort":  "reasoning_effort",
+			"webSearchOptions": "web_search_options",
+		}).
+		WithConfig(map[string]any{
+			"deferred":         true,
+			"reasoningEffort":  "high",
+			"webSearchOptions": map[string]any{"mode": "on"},
+		})
+	if g.err != nil {
+		t.Fatalf("WithConfig() error = %v", g.err)
+	}
+
+	data, err := json.Marshal(g.GetRequest())
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(data, &request); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got := request["reasoning_effort"]; got != "high" {
+		t.Errorf("reasoning_effort = %v, want high", got)
+	}
+	webSearch, ok := request["web_search_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("web_search_options = %#v, want object", request["web_search_options"])
+	}
+	if got := webSearch["mode"]; got != "on" {
+		t.Errorf("web_search_options.mode = %v, want on", got)
+	}
+	if got := request["deferred"]; got != true {
+		t.Errorf("deferred = %v, want true", got)
+	}
+	for _, name := range []string{"reasoningEffort", "webSearchOptions"} {
+		if _, ok := request[name]; ok {
+			t.Errorf("request contains unconverted %s field", name)
+		}
+	}
+}
+
 func TestWithConfigIgnoresNilPointer(t *testing.T) {
 	var config *openai.ChatCompletionNewParams
 	g := newGen().WithConfig(config)
