@@ -368,6 +368,27 @@ func TestWithConfigAppliesProviderAliases(t *testing.T) {
 	}
 }
 
+func TestWithConfigPreservesIdentityAlias(t *testing.T) {
+	g := newGen().
+		WithConfigAliases(map[string]string{"deferred": "deferred"}).
+		WithConfig(map[string]any{"deferred": true})
+	if g.err != nil {
+		t.Fatalf("WithConfig() error = %v", g.err)
+	}
+
+	data, err := json.Marshal(g.GetRequest())
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(data, &request); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got := request["deferred"]; got != true {
+		t.Errorf("deferred = %v, want true", got)
+	}
+}
+
 func TestWithConfigIgnoresNilPointer(t *testing.T) {
 	var config *openai.ChatCompletionNewParams
 	g := newGen().WithConfig(config)
