@@ -215,7 +215,9 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		for source, target := range g.configAliases {
 			if value, ok := normalizedConfig[source]; ok {
 				normalizedConfig[target] = value
-				delete(normalizedConfig, source)
+				if source != target {
+					delete(normalizedConfig, source)
+				}
 			}
 		}
 		// These Genkit common fields are handled outside the provider request
