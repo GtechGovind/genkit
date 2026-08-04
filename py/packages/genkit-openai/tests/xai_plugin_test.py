@@ -66,7 +66,7 @@ async def test_init_registers_exact_canonical_models_with_provider_metadata() ->
         assert action.metadata['model']['supports'] == standard_supports
 
     assert actions[4].metadata['model']['supports'] == {
-        'multiturn': False,
+        'multiturn': True,
         'media': True,
         'tools': True,
         'systemRole': False,
@@ -133,6 +133,7 @@ async def test_resolve_routes_chat_and_image_models_only_as_model_actions() -> N
     assert image is not None
     assert image.name == 'xai/grok-custom-image'
     assert await plugin.resolve(ActionKind.EMBEDDER, 'xai/grok-3') is None
+    assert await plugin.resolve(ActionKind.MODEL, 'openai/gpt-4o') is None
 
 
 def test_client_uses_canonical_base_url_and_explicit_key() -> None:
@@ -214,6 +215,18 @@ async def test_chat_action_maps_xai_request_extensions_to_api_fields() -> None:
     assert await_args.kwargs['web_search_options'] == {'search_context_size': 'high'}
     assert await_args.kwargs['extra_body'] == {'existing': 'preserved', 'deferred': True}
     assert 'deferred' not in await_args.kwargs
+
+
+def test_chat_model_normalizes_dictionary_config_as_xai_config() -> None:
+    xai = _xai_module()
+    config = xai._XAIChatModel.normalize_config({'reasoningEffort': 'high', 'deferred': True})
+
+    assert isinstance(config, xai.XAIConfig)
+    assert config.reasoning_effort == 'high'
+    assert config.deferred is True
+
+    with pytest.raises(ValidationError, match='reasoning_effort'):
+        xai._XAIChatModel.normalize_config({'reasoningEffort': 'minimal'})
 
 
 @pytest.mark.asyncio

@@ -57,7 +57,7 @@ XAI_CHAT_SUPPORTS = Supports(
     output=['text', 'json'],
 )
 XAI_VISION_SUPPORTS = Supports(
-    multiturn=False,
+    multiturn=True,
     media=True,
     tools=True,
     system_role=False,
@@ -145,6 +145,12 @@ def _config_schema(name: str) -> type[ModelConfig]:
 class _XAIChatModel(OpenAIModel):
     """OpenAI-compatible chat model with xAI request extensions."""
 
+    @staticmethod
+    def normalize_config(config: object) -> XAIConfig:
+        """Normalize generic Genkit configuration as xAI configuration."""
+        normalized = OpenAIModel.normalize_config(dict(config) if isinstance(config, dict) else config)
+        return XAIConfig.model_validate(normalized.model_dump(exclude_unset=True))
+
     async def _get_openai_request_config(self, request: ModelRequest) -> dict[str, Any]:
         config = await super()._get_openai_request_config(request)
         deferred = config.pop('deferred', None)
@@ -190,7 +196,7 @@ class XAI(Plugin):
 
     async def resolve(self, action_type: ActionKind, name: str) -> Action | None:
         """Resolve an xAI model action."""
-        if action_type != ActionKind.MODEL:
+        if action_type != ActionKind.MODEL or not name.startswith(f'{XAI_PLUGIN_NAME}/'):
             return None
         if _is_image_model(name):
             return self._create_image_action(name)
