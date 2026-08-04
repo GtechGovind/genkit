@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 
 	"github.com/firebase/genkit/go/ai"
@@ -49,7 +50,7 @@ var (
 
 // SpeechConfig configures an OpenAI-compatible text-to-speech request.
 type SpeechConfig struct {
-	Voice          openai.AudioSpeechNewParamsVoice          `json:"voice,omitempty" jsonschema:"enum=alloy,enum=echo,enum=fable,enum=onyx,enum=nova,enum=shimmer,default=alloy"`
+	Voice          openai.AudioSpeechNewParamsVoice          `json:"voice,omitempty" jsonschema:"enum=alloy,enum=ash,enum=ballad,enum=coral,enum=echo,enum=fable,enum=onyx,enum=nova,enum=sage,enum=shimmer,enum=verse,default=alloy"`
 	Speed          float64                                   `json:"speed,omitempty" jsonschema:"minimum=0.25,maximum=4"`
 	ResponseFormat openai.AudioSpeechNewParamsResponseFormat `json:"response_format,omitempty" jsonschema:"enum=mp3,enum=opus,enum=aac,enum=flac,enum=wav,enum=pcm"`
 	Version        string                                    `json:"version,omitempty"`
@@ -157,6 +158,9 @@ func (o *OpenAICompatible) DefineSpeechModel(provider, id string, opts ai.ModelO
 			format = openai.AudioSpeechNewParamsResponseFormatMP3
 		}
 		contentType := responseFormatMediaTypes[format]
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
 		dataURI := fmt.Sprintf("data:%s;base64,%s", contentType, base64.StdEncoding.EncodeToString(audio))
 		return &ai.ModelResponse{
 			Message:      ai.NewModelMessage(ai.NewMediaPart(contentType, dataURI)),
@@ -179,7 +183,7 @@ func (o *OpenAICompatible) DefineTranscriptionModel(provider, id string, opts ai
 		opts.Supports = &TranscriptionSupports
 	}
 	if opts.ConfigSchema == nil {
-		opts.ConfigSchema = core.InferSchemaMap(TranscriptionConfig{})
+		opts.ConfigSchema = transcriptionConfigSchema(id)
 	}
 	if opts.Versions == nil {
 		opts.Versions = []string{id}
@@ -255,13 +259,16 @@ func (o *OpenAICompatible) generateTranscription(
 	if config.Version != "" {
 		model = config.Version
 	}
-	chunkingStrategy, err := toChunkingStrategy(config.ChunkingStrategy)
-	if err != nil {
-		return nil, fmt.Errorf("invalid chunking strategy: %w", err)
-	}
-	format, err := transcriptionResponseFormat(req.Output, config.ResponseFormat)
+	format, err := transcriptionResponseFormat(
+		req.Output,
+		config.ResponseFormat,
+		defaultTranscriptionResponseFormat(model),
+	)
 	if err != nil {
 		return nil, err
+	}
+	if isGPTTranscriptionModel(model) && format != openai.AudioResponseFormatJSON {
+		return nil, fmt.Errorf("model %s only supports json responses", model)
 	}
 
 	file := &audioFile{
@@ -270,17 +277,7 @@ func (o *OpenAICompatible) generateTranscription(
 		contentType: contentType,
 	}
 	if translate {
-		params := openai.AudioTranslationNewParams{
-			File:           file,
-			Model:          model,
-			ResponseFormat: openai.AudioTranslationNewParamsResponseFormat(format),
-		}
-		if prompt != "" {
-			params.Prompt = openai.String(prompt)
-		}
-		if config.Temperature != 0 {
-			params.Temperature = openai.Float(config.Temperature)
-		}
+		params := audioTranslationParams(file, model, prompt, config, format)
 		text, raw, err := o.audioTextResponse(ctx, "audio/translations", params, format)
 		if err != nil {
 			return nil, err
@@ -288,6 +285,49 @@ func (o *OpenAICompatible) generateTranscription(
 		return transcriptionResponse(req, text, raw), nil
 	}
 
+	params, err := audioTranscriptionParams(file, model, prompt, config, format)
+	if err != nil {
+		return nil, err
+	}
+	text, raw, err := o.audioTextResponse(ctx, "audio/transcriptions", params, format)
+	if err != nil {
+		return nil, err
+	}
+	return transcriptionResponse(req, text, raw), nil
+}
+
+func audioTranslationParams(
+	file *audioFile,
+	model string,
+	prompt string,
+	config TranscriptionConfig,
+	format openai.AudioResponseFormat,
+) openai.AudioTranslationNewParams {
+	params := openai.AudioTranslationNewParams{
+		File:           file,
+		Model:          model,
+		ResponseFormat: openai.AudioTranslationNewParamsResponseFormat(format),
+	}
+	if prompt != "" {
+		params.Prompt = openai.String(prompt)
+	}
+	if config.Temperature != 0 {
+		params.Temperature = openai.Float(config.Temperature)
+	}
+	return params
+}
+
+func audioTranscriptionParams(
+	file *audioFile,
+	model string,
+	prompt string,
+	config TranscriptionConfig,
+	format openai.AudioResponseFormat,
+) (openai.AudioTranscriptionNewParams, error) {
+	chunkingStrategy, err := toChunkingStrategy(config.ChunkingStrategy)
+	if err != nil {
+		return openai.AudioTranscriptionNewParams{}, fmt.Errorf("invalid chunking strategy: %w", err)
+	}
 	params := openai.AudioTranscriptionNewParams{
 		File:                   file,
 		Model:                  model,
@@ -307,12 +347,7 @@ func (o *OpenAICompatible) generateTranscription(
 	}
 
 	params.ResponseFormat = format
-
-	text, raw, err := o.audioTextResponse(ctx, "audio/transcriptions", params, format)
-	if err != nil {
-		return nil, err
-	}
-	return transcriptionResponse(req, text, raw), nil
+	return params, nil
 }
 
 func toChunkingStrategy(value any) (openai.AudioTranscriptionNewParamsChunkingStrategyUnion, error) {
@@ -390,7 +425,7 @@ func transcriptionInput(req *ai.ModelRequest) (*ai.Part, string, error) {
 		if part == nil {
 			continue
 		}
-		if media == nil && part.IsMedia() {
+		if media == nil && part.IsAudio() {
 			media = part
 		}
 		if part.IsText() || part.IsData() {
@@ -398,12 +433,16 @@ func transcriptionInput(req *ai.ModelRequest) (*ai.Part, string, error) {
 		}
 	}
 	if media == nil {
-		return nil, "", errors.New("no media found in the transcription request")
+		return nil, "", errors.New("no audio found in the transcription request")
 	}
 	return media, prompt.String(), nil
 }
 
-func transcriptionResponseFormat(output *ai.ModelOutputConfig, custom openai.AudioResponseFormat) (openai.AudioResponseFormat, error) {
+func transcriptionResponseFormat(
+	output *ai.ModelOutputConfig,
+	custom openai.AudioResponseFormat,
+	defaultFormat openai.AudioResponseFormat,
+) (openai.AudioResponseFormat, error) {
 	outputFormat := ""
 	if output != nil {
 		outputFormat = output.Format
@@ -420,7 +459,43 @@ func transcriptionResponseFormat(output *ai.ModelOutputConfig, custom openai.Aud
 	if outputFormat != "" {
 		return openai.AudioResponseFormat(outputFormat), nil
 	}
-	return openai.AudioResponseFormatText, nil
+	return defaultFormat, nil
+}
+
+func defaultTranscriptionResponseFormat(model string) openai.AudioResponseFormat {
+	if isGPTTranscriptionModel(model) {
+		return openai.AudioResponseFormatJSON
+	}
+	return openai.AudioResponseFormatText
+}
+
+func transcriptionConfigSchema(model string) map[string]any {
+	schema := core.InferSchemaMap(TranscriptionConfig{})
+	if !isGPTTranscriptionModel(model) {
+		return schema
+	}
+	// The pinned OpenAI SDK supports only JSON responses for GPT transcription
+	// models, which is intentionally stricter than the current canonical JS schema.
+	schema = maps.Clone(schema)
+	properties := maps.Clone(schema["properties"].(map[string]any))
+	schema["properties"] = properties
+	responseFormat := maps.Clone(properties["response_format"].(map[string]any))
+	properties["response_format"] = responseFormat
+	responseFormat["enum"] = []any{string(openai.AudioResponseFormatJSON)}
+	responseFormat["default"] = string(openai.AudioResponseFormatJSON)
+	return schema
+}
+
+func isGPTTranscriptionModel(model string) bool {
+	for _, base := range []string{
+		openai.AudioModelGPT4oTranscribe,
+		openai.AudioModelGPT4oMiniTranscribe,
+	} {
+		if model == base || strings.HasPrefix(model, base+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 type audioFile struct {
@@ -433,14 +508,26 @@ func (f *audioFile) Filename() string    { return f.filename }
 func (f *audioFile) ContentType() string { return f.contentType }
 
 func audioFilename(contentType string) string {
+	if idx := strings.IndexByte(contentType, ';'); idx >= 0 {
+		contentType = contentType[:idx]
+	}
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
 	extensions := map[string]string{
-		"audio/mpeg": ".mp3",
-		"audio/mp3":  ".mp3",
-		"audio/mp4":  ".mp4",
-		"audio/wav":  ".wav",
-		"audio/ogg":  ".ogg",
-		"audio/flac": ".flac",
-		"audio/webm": ".webm",
+		"audio/mpeg":   ".mp3",
+		"audio/mp3":    ".mp3",
+		"audio/x-mp3":  ".mp3",
+		"audio/mp4":    ".mp4",
+		"audio/m4a":    ".m4a",
+		"audio/x-m4a":  ".m4a",
+		"audio/wav":    ".wav",
+		"audio/x-wav":  ".wav",
+		"audio/wave":   ".wav",
+		"audio/ogg":    ".ogg",
+		"audio/x-ogg":  ".ogg",
+		"audio/flac":   ".flac",
+		"audio/x-flac": ".flac",
+		"audio/webm":   ".webm",
+		"audio/x-webm": ".webm",
 	}
 	extension := extensions[contentType]
 	if extension == "" {

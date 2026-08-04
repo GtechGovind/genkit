@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
@@ -72,6 +73,84 @@ func TestGPT4oMiniTTSSchemaOmitsSpeed(t *testing.T) {
 	}
 	if _, ok := properties["speed"]; ok {
 		t.Error("gpt-4o-mini-tts schema unexpectedly includes speed")
+	}
+}
+
+func TestSchemaWithoutPropertyDoesNotMutateInput(t *testing.T) {
+	properties := map[string]any{
+		"speed": map[string]any{"type": "number"},
+		"voice": map[string]any{"type": "string"},
+	}
+	schema := map[string]any{
+		"type":       "object",
+		"properties": properties,
+	}
+
+	got := schemaWithoutProperty(schema, "speed")
+	gotProperties := got["properties"].(map[string]any)
+	if _, ok := gotProperties["speed"]; ok {
+		t.Error("transformed schema still contains speed")
+	}
+	if properties["speed"] == nil {
+		t.Error("schemaWithoutProperty mutated the input properties")
+	}
+	if gotProperties["voice"] == nil {
+		t.Error("transformed schema lost the voice property")
+	}
+}
+
+func TestSpeechSchemaIncludesAllOpenAIVoices(t *testing.T) {
+	schema := supportedSpeechModels["tts-1"].ConfigSchema
+	properties := schema["properties"].(map[string]any)
+	voice := properties["voice"].(map[string]any)
+	values := voice["enum"].([]any)
+	for _, want := range []any{"alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"} {
+		if !slices.Contains(values, want) {
+			t.Errorf("voice enum = %#v, want %q", values, want)
+		}
+	}
+}
+
+func TestGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
+	plugin := &OpenAI{APIKey: "test-key"}
+	actions := plugin.Init(context.Background())
+	byName := make(map[string]api.Action, len(actions))
+	for _, action := range actions {
+		byName[action.Name()] = action
+	}
+	for _, name := range []string{"gpt-4o-transcribe", "gpt-4o-mini-transcribe"} {
+		t.Run(name, func(t *testing.T) {
+			action := byName["openai/"+name]
+			if action == nil {
+				t.Fatalf("model %q was not registered", name)
+			}
+			inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
+			schema := inputProperties["config"].(map[string]any)
+			properties := schema["properties"].(map[string]any)
+			responseFormat := properties["response_format"].(map[string]any)
+			if got := responseFormat["default"]; got != "json" {
+				t.Errorf("response_format default = %v, want json", got)
+			}
+			if got := responseFormat["enum"]; !slices.Equal(got.([]any), []any{"json"}) {
+				t.Errorf("response_format enum = %#v, want [json]", got)
+			}
+		})
+	}
+}
+
+func TestVersionedGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
+	plugin := &OpenAI{APIKey: "test-key"}
+	plugin.Init(context.Background())
+	action := plugin.ResolveAction(api.ActionTypeModel, "gpt-4o-transcribe-2026-01-01")
+	if action == nil {
+		t.Fatal("ResolveAction() = nil")
+	}
+	inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
+	config := inputProperties["config"].(map[string]any)
+	properties := config["properties"].(map[string]any)
+	responseFormat := properties["response_format"].(map[string]any)
+	if got := responseFormat["enum"]; !slices.Equal(got.([]any), []any{"json"}) {
+		t.Errorf("response_format enum = %#v, want [json]", got)
 	}
 }
 
@@ -194,6 +273,21 @@ func TestListActionsClassifiesAudioModels(t *testing.T) {
 		}
 		if action.Name == "openai/future-transcribe" && (output[0] != "text" || supports["media"] != true) {
 			t.Errorf("transcription supports = %#v, want media input and text output", supports)
+		}
+		properties, ok := action.InputSchema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s input schema properties = %#v, want map", action.Name, action.InputSchema["properties"])
+		}
+		config, ok := properties["config"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s config schema = %#v, want map", action.Name, properties["config"])
+		}
+		configProperties := config["properties"].(map[string]any)
+		if action.Name == "openai/future-tts" && configProperties["voice"] == nil {
+			t.Error("dynamic TTS action config schema has no voice property")
+		}
+		if action.Name == "openai/future-transcribe" && configProperties["response_format"] == nil {
+			t.Error("dynamic transcription action config schema has no response_format property")
 		}
 	}
 }

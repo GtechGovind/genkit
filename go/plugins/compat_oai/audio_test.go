@@ -124,6 +124,31 @@ func TestSpeechModelDefaultsVoiceAndFormat(t *testing.T) {
 	}
 }
 
+func TestSpeechModelUnknownFormatUsesBinaryContentType(t *testing.T) {
+	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("audio"))
+	})
+	model := plugin.DefineSpeechModel("test", "tts-1", ai.ModelOptions{
+		ConfigSchema: map[string]any{"type": "object"},
+	})
+	resp, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserTextMessage("Hello")},
+		Config: SpeechConfig{
+			ResponseFormat: openai.AudioSpeechNewParamsResponseFormat("future-format"),
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := resp.Message.Content[0]
+	if got := part.ContentType; got != "application/octet-stream" {
+		t.Errorf("content type = %q, want application/octet-stream", got)
+	}
+	if !strings.HasPrefix(part.Text, "data:application/octet-stream;base64,") {
+		t.Errorf("media URL = %q, want binary data URI", part.Text)
+	}
+}
+
 func TestAudioModelsRejectStreaming(t *testing.T) {
 	plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
 		t.Fatal("server should not be called for streaming requests")
@@ -217,7 +242,7 @@ func TestTranscriptionModelJSONResponse(t *testing.T) {
 	model := plugin.DefineTranscriptionModel("test", "gpt-4o-transcribe", ai.ModelOptions{})
 	resp, err := model.Generate(context.Background(), &ai.ModelRequest{
 		Messages: []*ai.Message{ai.NewUserMessage(
-			ai.NewMediaPart("audio/mpeg", "data:audio/mpeg;base64,YXVkaW8="),
+			ai.NewMediaPart("audio/wav", "data:audio/wav;base64,YXVkaW8="),
 		)},
 		Output: &ai.ModelOutputConfig{Format: "json"},
 	}, nil)
@@ -226,6 +251,84 @@ func TestTranscriptionModelJSONResponse(t *testing.T) {
 	}
 	if got := resp.Text(); got != "Hello JSON" {
 		t.Errorf("response text = %q, want Hello JSON", got)
+	}
+}
+
+func TestGPTTranscriptionModelDefaultsToJSON(t *testing.T) {
+	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		reader, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("MultipartReader: %v", err)
+		}
+		fields := readMultipartFields(t, reader)
+		if got := fields["response_format"]; got != "json" {
+			t.Errorf("response_format = %q, want json", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":"Hello JSON"}`)
+	})
+
+	model := plugin.DefineTranscriptionModel("test", "gpt-4o-transcribe", ai.ModelOptions{})
+	resp, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("audio/wav", "data:audio/wav;base64,YXVkaW8="),
+		)},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Text(); got != "Hello JSON" {
+		t.Errorf("response text = %q, want Hello JSON", got)
+	}
+}
+
+func TestVersionedGPTTranscriptionModelDefaultsToJSON(t *testing.T) {
+	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		reader, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("MultipartReader: %v", err)
+		}
+		fields := readMultipartFields(t, reader)
+		if got := fields["model"]; got != "gpt-4o-transcribe-2026-01-01" {
+			t.Errorf("model = %q, want versioned GPT transcription model", got)
+		}
+		if got := fields["response_format"]; got != "json" {
+			t.Errorf("response_format = %q, want json", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":"Versioned JSON"}`)
+	})
+
+	model := plugin.DefineTranscriptionModel("test", "custom-transcribe", ai.ModelOptions{
+		Versions: []string{"custom-transcribe", "gpt-4o-transcribe-2026-01-01"},
+	})
+	resp, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("audio/wav", "data:audio/wav;base64,YXVkaW8="),
+		)},
+		Config: TranscriptionConfig{Version: "gpt-4o-transcribe-2026-01-01"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Text(); got != "Versioned JSON" {
+		t.Errorf("response text = %q, want Versioned JSON", got)
+	}
+}
+
+func TestGPTTranscriptionModelRejectsNonJSONResponseFormat(t *testing.T) {
+	plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("server should not be called")
+	})
+	model := plugin.DefineTranscriptionModel("test", "gpt-4o-transcribe", ai.ModelOptions{})
+	_, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("audio/wav", "data:audio/wav;base64,YXVkaW8="),
+		)},
+		Output: &ai.ModelOutputConfig{Format: "text"},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "only supports json") {
+		t.Fatalf("Generate() error = %v, want JSON-only error", err)
 	}
 }
 
@@ -243,6 +346,45 @@ func TestTranscriptionModelRejectsIncompatibleOutput(t *testing.T) {
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not compatible") {
 		t.Fatalf("Generate() error = %v, want incompatible output error", err)
+	}
+}
+
+func TestTranscriptionModelRejectsNonAudioMedia(t *testing.T) {
+	plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("server should not be called")
+	})
+	model := plugin.DefineTranscriptionModel("test", "whisper-1", ai.ModelOptions{})
+	_, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("image/png", "data:image/png;base64,aW1hZ2U="),
+		)},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "audio") {
+		t.Fatalf("Generate() error = %v, want missing-audio error", err)
+	}
+}
+
+func TestTranslationIgnoresTranscriptionChunkingStrategy(t *testing.T) {
+	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/audio/translations" {
+			t.Errorf("path = %q, want /audio/translations", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "Translated")
+	})
+	req := &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("audio/wav", "data:audio/wav;base64,YXVkaW8="),
+		)},
+	}
+	resp, err := plugin.generateTranscription(context.Background(), req, "whisper-1", TranscriptionConfig{
+		ChunkingStrategy: make(chan int),
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Text(); got != "Translated" {
+		t.Errorf("response text = %q, want Translated", got)
 	}
 }
 
@@ -275,6 +417,30 @@ func TestToChunkingStrategy(t *testing.T) {
 			}
 			if string(got) != tc.want {
 				t.Errorf("chunking strategy = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAudioFilenameNormalizesContentType(t *testing.T) {
+	for _, tc := range []struct {
+		contentType string
+		want        string
+	}{
+		{contentType: "audio/wav; codecs=1", want: "input.wav"},
+		{contentType: " Audio/X-Wav ", want: "input.wav"},
+		{contentType: "audio/wave", want: "input.wav"},
+		{contentType: "audio/x-mp3", want: "input.mp3"},
+		{contentType: "audio/m4a", want: "input.m4a"},
+		{contentType: "audio/x-m4a", want: "input.m4a"},
+		{contentType: "audio/x-ogg", want: "input.ogg"},
+		{contentType: "audio/x-flac", want: "input.flac"},
+		{contentType: "audio/x-webm", want: "input.webm"},
+		{contentType: "application/octet-stream", want: "input.mp3"},
+	} {
+		t.Run(tc.contentType, func(t *testing.T) {
+			if got := audioFilename(tc.contentType); got != tc.want {
+				t.Errorf("audioFilename(%q) = %q, want %q", tc.contentType, got, tc.want)
 			}
 		})
 	}

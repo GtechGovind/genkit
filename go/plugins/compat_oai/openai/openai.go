@@ -17,6 +17,7 @@ package openai
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 
@@ -180,14 +181,12 @@ var (
 
 	supportedTranscriptionModels = map[string]ai.ModelOptions{
 		openaiGo.AudioModelGPT4oTranscribe: {
-			Label:        "OpenAI GPT-4o Transcribe",
-			Supports:     &compat_oai.TranscriptionSupports,
-			ConfigSchema: core.InferSchemaMap(compat_oai.TranscriptionConfig{}),
+			Label:    "OpenAI GPT-4o Transcribe",
+			Supports: &compat_oai.TranscriptionSupports,
 		},
 		openaiGo.AudioModelGPT4oMiniTranscribe: {
-			Label:        "OpenAI GPT-4o Mini Transcribe",
-			Supports:     &compat_oai.TranscriptionSupports,
-			ConfigSchema: core.InferSchemaMap(compat_oai.TranscriptionConfig{}),
+			Label:    "OpenAI GPT-4o Mini Transcribe",
+			Supports: &compat_oai.TranscriptionSupports,
 		},
 	}
 
@@ -201,11 +200,19 @@ var (
 )
 
 func speechConfigSchemaWithoutSpeed() map[string]any {
-	schema := core.InferSchemaMap(compat_oai.SpeechConfig{})
-	if properties, ok := schema["properties"].(map[string]any); ok {
-		delete(properties, "speed")
+	return schemaWithoutProperty(core.InferSchemaMap(compat_oai.SpeechConfig{}), "speed")
+}
+
+func schemaWithoutProperty(schema map[string]any, property string) map[string]any {
+	result := maps.Clone(schema)
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return result
 	}
-	return schema
+	properties = maps.Clone(properties)
+	delete(properties, property)
+	result["properties"] = properties
+	return result
 }
 
 type OpenAI struct {
@@ -331,7 +338,7 @@ func (o *OpenAI) ListActions(ctx context.Context) []api.ActionDesc {
 		default:
 			model = o.DefineTranscriptionModel(name, opts)
 		}
-		actions[i].Metadata = model.(api.Action).Desc().Metadata
+		actions[i] = model.(api.Action).Desc()
 	}
 	return actions
 }
@@ -378,9 +385,8 @@ func audioModelOptions(name string) (ai.ModelOptions, string, bool) {
 	}
 	if strings.Contains(name, "transcribe") {
 		return ai.ModelOptions{
-			Label:        fmt.Sprintf("OpenAI %s", name),
-			Supports:     &compat_oai.TranscriptionSupports,
-			ConfigSchema: core.InferSchemaMap(compat_oai.TranscriptionConfig{}),
+			Label:    fmt.Sprintf("OpenAI %s", name),
+			Supports: &compat_oai.TranscriptionSupports,
 		}, "transcription", true
 	}
 	return ai.ModelOptions{}, "", false
