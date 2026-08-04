@@ -65,7 +65,7 @@ var (
 		Output:     []string{"text", "json"},
 	}
 	visionModelSupports = ai.ModelSupports{
-		Multiturn:  false,
+		Multiturn:  true,
 		Tools:      true,
 		SystemRole: false,
 		Media:      true,
