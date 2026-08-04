@@ -68,6 +68,10 @@ type OpenAICompatible struct {
 	// Should be lowercase and match the plugin's Name() method.
 	Provider string
 
+	// ConfigAliases maps Genkit-facing configuration names to the field names
+	// expected by the provider's OpenAI-compatible API.
+	ConfigAliases map[string]string
+
 	// API key to use with the desired plugin.
 	APIKey string
 
@@ -121,6 +125,7 @@ func (o *OpenAICompatible) DefineModel(provider, id string, opts ai.ModelOptions
 	) (*ai.ModelResponse, error) {
 		// Configure the response generator with input
 		generator := NewModelGenerator(o.client, id).
+			WithConfigAliases(o.ConfigAliases).
 			WithMessages(input.Messages).
 			WithConfig(input.Config).
 			WithTools(input.Tools).

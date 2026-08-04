@@ -36,8 +36,17 @@ type ModelGenerator struct {
 	request   *openai.ChatCompletionNewParams
 	messages  []openai.ChatCompletionMessageParamUnion
 	tools     []openai.ChatCompletionToolParam
+	// configAliases contains provider-specific config name translations.
+	configAliases map[string]string
 	// Store any errors that occur during building
 	err error
+}
+
+// WithConfigAliases configures provider-specific translations from
+// Genkit-facing config names to OpenAI-compatible request field names.
+func (g *ModelGenerator) WithConfigAliases(aliases map[string]string) *ModelGenerator {
+	g.configAliases = aliases
+	return g
 }
 
 // chatCompletionParamFields contains every field serialized by the OpenAI SDK.
@@ -198,6 +207,12 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 			"topLogProbs":      "top_logprobs",
 			"topP":             "top_p",
 		} {
+			if value, ok := normalizedConfig[source]; ok {
+				normalizedConfig[target] = value
+				delete(normalizedConfig, source)
+			}
+		}
+		for source, target := range g.configAliases {
 			if value, ok := normalizedConfig[source]; ok {
 				normalizedConfig[target] = value
 				delete(normalizedConfig, source)

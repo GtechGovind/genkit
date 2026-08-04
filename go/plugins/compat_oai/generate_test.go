@@ -278,6 +278,33 @@ func TestWithConfigPreservesProviderSpecificFields(t *testing.T) {
 	}
 }
 
+func TestWithConfigAppliesProviderAliases(t *testing.T) {
+	g := newGen().
+		WithConfigAliases(map[string]string{"maxTokens": "max_tokens"}).
+		WithConfig(map[string]any{"maxTokens": 8192})
+	if g.err != nil {
+		t.Fatalf("WithConfig() error = %v", g.err)
+	}
+
+	data, err := json.Marshal(g.GetRequest())
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(data, &request); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got := request["max_tokens"]; got != float64(8192) {
+		t.Errorf("max_tokens = %v, want 8192", got)
+	}
+	if _, ok := request["maxTokens"]; ok {
+		t.Error("request contains unconverted maxTokens field")
+	}
+	if _, ok := g.GetRequest().ExtraFields()["max_tokens"]; ok {
+		t.Error("max_tokens was added as an extra field")
+	}
+}
+
 func TestWithConfigIgnoresNilPointer(t *testing.T) {
 	var config *openai.ChatCompletionNewParams
 	g := newGen().WithConfig(config)
