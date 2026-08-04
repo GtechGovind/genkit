@@ -17,7 +17,9 @@ package deepseek
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core"
@@ -136,10 +138,25 @@ func (d *DeepSeek) DefineModel(id string, opts ai.ModelOptions) ai.Model {
 
 // ListActions lists models exposed by the configured DeepSeek endpoint.
 func (d *DeepSeek) ListActions(ctx context.Context) []api.ActionDesc {
-	return d.openAICompatible.ListActions(ctx)
+	actions := d.openAICompatible.ListActions(ctx)
+	for i := range actions {
+		name := strings.TrimPrefix(actions[i].Name, provider+"/")
+		actions[i] = d.DefineModel(name, optionsForModel(name)).(api.Action).Desc()
+	}
+	return actions
 }
 
 // ResolveAction dynamically registers a model exposed by the DeepSeek endpoint.
 func (d *DeepSeek) ResolveAction(atype api.ActionType, name string) api.Action {
-	return d.openAICompatible.ResolveAction(atype, name)
+	if atype != api.ActionTypeModel {
+		return nil
+	}
+	return d.DefineModel(name, optionsForModel(name)).(api.Action)
+}
+
+func optionsForModel(name string) ai.ModelOptions {
+	if opts, ok := supportedModels[name]; ok {
+		return opts
+	}
+	return modelOptions(name, fmt.Sprintf("DeepSeek - %s", name))
 }

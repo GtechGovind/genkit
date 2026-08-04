@@ -188,3 +188,50 @@ func TestPluginRequiresAPIKey(t *testing.T) {
 	}()
 	(&deepseek.DeepSeek{}).Init(context.Background())
 }
+
+func TestDynamicModelsUseDeepSeekMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("path = %q, want %q", r.URL.Path, "/models")
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"deepseek-custom","object":"model","created":1,"owned_by":"deepseek"}]}`)
+	}))
+	defer server.Close()
+
+	plugin := &deepseek.DeepSeek{APIKey: "test-key", BaseURL: server.URL}
+	plugin.Init(context.Background())
+
+	descs := plugin.ListActions(context.Background())
+	if len(descs) != 1 {
+		t.Fatalf("ListActions() returned %d actions, want 1", len(descs))
+	}
+	assertDeepSeekMetadata(t, descs[0])
+
+	resolved := plugin.ResolveAction(api.ActionTypeModel, "deepseek-custom")
+	if resolved == nil {
+		t.Fatal("ResolveAction(model) = nil")
+	}
+	assertDeepSeekMetadata(t, resolved.Desc())
+	if got := plugin.ResolveAction(api.ActionTypeEmbedder, "deepseek-custom"); got != nil {
+		t.Errorf("ResolveAction(embedder) = %v, want nil", got)
+	}
+}
+
+func assertDeepSeekMetadata(t *testing.T, desc api.ActionDesc) {
+	t.Helper()
+	metadata := desc.Metadata["model"].(map[string]any)
+	supports := metadata["supports"].(map[string]any)
+	if got := supports["media"]; got != false {
+		t.Errorf("media support = %v, want false", got)
+	}
+	if got := supports["tools"]; got != true {
+		t.Errorf("tools support = %v, want true", got)
+	}
+	properties := metadata["customOptions"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := properties["maxTokens"]; !ok {
+		t.Error("customOptions does not contain maxTokens")
+	}
+}
