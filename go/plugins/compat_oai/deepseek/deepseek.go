@@ -27,9 +27,9 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
-// ChatCompletionConfig describes configuration accepted by DeepSeek chat
+// chatCompletionConfig describes the schema accepted by DeepSeek chat
 // completions. MaxTokens is DeepSeek's provider-specific output token limit.
-type ChatCompletionConfig struct {
+type chatCompletionConfig struct {
 	ai.GenerationCommonConfig
 	MaxTokens        *int     `json:"maxTokens,omitempty" jsonschema:"minimum=1,maximum=8192"`
 	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty" jsonschema:"minimum=-2,maximum=2"`
@@ -56,7 +56,7 @@ var supportedModels = map[string]ai.ModelOptions{
 func modelOptions(id, label string) ai.ModelOptions {
 	return ai.ModelOptions{
 		Label:        label,
-		ConfigSchema: core.InferSchemaMap(ChatCompletionConfig{}),
+		ConfigSchema: core.InferSchemaMap(chatCompletionConfig{}),
 		Supports: &ai.ModelSupports{
 			Multiturn:  true,
 			Tools:      true,

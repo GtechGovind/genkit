@@ -17,6 +17,7 @@ package compat_oai
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/firebase/genkit/go/ai"
@@ -69,8 +70,10 @@ type OpenAICompatible struct {
 	Provider string
 
 	// ConfigAliases maps Genkit-facing configuration names to the field names
-	// expected by the provider's OpenAI-compatible API.
+	// expected by the provider's OpenAI-compatible API. Configure it before
+	// calling Init; Init snapshots the map for concurrent model requests.
 	ConfigAliases map[string]string
+	configAliases map[string]string
 
 	// API key to use with the desired plugin.
 	APIKey string
@@ -100,6 +103,7 @@ func (o *OpenAICompatible) Init(ctx context.Context) []api.Action {
 	// create client
 	client := openai.NewClient(o.Opts...)
 	o.client = &client
+	o.configAliases = maps.Clone(o.ConfigAliases)
 	o.initted = true
 
 	return []api.Action{}
@@ -125,7 +129,7 @@ func (o *OpenAICompatible) DefineModel(provider, id string, opts ai.ModelOptions
 	) (*ai.ModelResponse, error) {
 		// Configure the response generator with input
 		generator := NewModelGenerator(o.client, id).
-			WithConfigAliases(o.ConfigAliases).
+			WithConfigAliases(o.configAliases).
 			WithMessages(input.Messages).
 			WithConfig(input.Config).
 			WithTools(input.Tools).
