@@ -90,11 +90,17 @@ def _to_image_generate_params(
     prompt = _extract_prompt_text(request)
     config = extract_config_dict(request)
 
+    has_snake_case_response_format = 'response_format' in config
+    response_format = config.pop('response_format', None)
+    camel_case_response_format = config.pop('responseFormat', None)
+    if not has_snake_case_response_format:
+        response_format = camel_case_response_format
+
     # Start with required params.
     params: dict[str, Any] = {
         'model': config.pop('version', None) or model_name,
         'prompt': prompt,
-        'response_format': config.pop('response_format', 'b64_json'),
+        'response_format': response_format or 'b64_json',
     }
 
     # Strip standard GenAI config keys that don't apply to image generation.

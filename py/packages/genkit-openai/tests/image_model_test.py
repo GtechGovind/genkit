@@ -148,6 +148,25 @@ class TestToImageGenerateParams:
             'response_format': 'b64_json',
         }
 
+    @pytest.mark.parametrize(
+        ('config', 'expected'),
+        [
+            ({'responseFormat': 'url'}, 'url'),
+            ({'response_format': 'url'}, 'url'),
+            ({'response_format': 'b64_json', 'responseFormat': 'url'}, 'b64_json'),
+        ],
+    )
+    def test_normalizes_response_format_aliases(self, config: dict[str, object], expected: str) -> None:
+        request = ModelRequest.model_validate({
+            'messages': [Message(role=Role.USER, content=[Part(root=TextPart(text='test'))])],
+            'config': config,
+        })
+
+        got = _to_image_generate_params('dall-e-3', request)
+
+        assert got['response_format'] == expected
+        assert 'responseFormat' not in got
+
     def test_version_override(self) -> None:
         """Verify model version override via config."""
         request = ModelRequest(
