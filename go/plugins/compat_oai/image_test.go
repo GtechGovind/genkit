@@ -95,12 +95,46 @@ func TestImageGenerateParamsDefaults(t *testing.T) {
 
 func TestImageGenerateParamsRejectsInvalidPrompt(t *testing.T) {
 	for _, request := range []*ai.ModelRequest{
+		nil,
 		{},
 		{Messages: []*ai.Message{ai.NewUserMessage(ai.NewMediaPart("image/png", "https://example.com/input.png"))}},
 	} {
 		if _, err := imageGenerateParams("dall-e-3", request); err == nil {
 			t.Error("imageGenerateParams() succeeded without a text prompt")
 		}
+	}
+}
+
+func TestGenerateImageRejectsNilClient(t *testing.T) {
+	_, err := generateImage(
+		context.Background(),
+		nil,
+		"dall-e-3",
+		&ai.ModelRequest{Messages: []*ai.Message{ai.NewUserTextMessage("a mountain")}},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("generateImage() succeeded with a nil client")
+	}
+}
+
+func TestGenerateImageRejectsNilResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `null`)
+	}))
+	defer server.Close()
+
+	client := openai.NewClient(option.WithAPIKey("test"), option.WithBaseURL(server.URL))
+	_, err := generateImage(
+		context.Background(),
+		&client,
+		"dall-e-3",
+		&ai.ModelRequest{Messages: []*ai.Message{ai.NewUserTextMessage("a mountain")}},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("generateImage() succeeded with a nil Images API result")
 	}
 }
 

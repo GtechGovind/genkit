@@ -44,6 +44,9 @@ type ImageGenerationConfig struct {
 }
 
 func imageGenerateParams(modelName string, input *ai.ModelRequest) (openai.ImageGenerateParams, error) {
+	if input == nil {
+		return openai.ImageGenerateParams{}, fmt.Errorf("model request cannot be nil")
+	}
 	if len(input.Messages) == 0 || input.Messages[0] == nil {
 		return openai.ImageGenerateParams{}, fmt.Errorf("image generation requires a prompt message")
 	}
@@ -170,6 +173,9 @@ func generateImage(
 	if cb != nil {
 		return nil, fmt.Errorf("streaming mode not supported for image generation")
 	}
+	if client == nil {
+		return nil, fmt.Errorf("openai client is not initialized")
+	}
 	params, err := imageGenerateParams(modelName, input)
 	if err != nil {
 		return nil, err
@@ -177,6 +183,9 @@ func generateImage(
 	result, err := client.Images.Generate(ctx, params)
 	if err != nil {
 		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("received nil response from OpenAI Images API")
 	}
 	return imageResponse(result, input, params.OutputFormat), nil
 }
