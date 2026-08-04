@@ -149,6 +149,29 @@ func TestSpeechModelUnknownFormatUsesBinaryContentType(t *testing.T) {
 	}
 }
 
+func TestSpeechModelSendsInstructions(t *testing.T) {
+	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if got := body["instructions"]; got != "Speak warmly." {
+			t.Errorf("instructions = %v, want Speak warmly.", got)
+		}
+		_, _ = w.Write([]byte("audio"))
+	})
+	model := plugin.DefineSpeechModel("test", "gpt-4o-mini-tts", ai.ModelOptions{
+		ConfigSchema: map[string]any{"type": "object"},
+	})
+	_, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserTextMessage("Hello")},
+		Config:   map[string]any{"instructions": "Speak warmly."},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAudioModelsRejectStreaming(t *testing.T) {
 	plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
 		t.Fatal("server should not be called for streaming requests")
@@ -364,6 +387,36 @@ func TestTranscriptionModelRejectsNonAudioMedia(t *testing.T) {
 	}
 }
 
+func TestTranscriptionModelRejectsRemoteAudio(t *testing.T) {
+	plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("server should not be called")
+	})
+	model := plugin.DefineTranscriptionModel("test", "whisper-1", ai.ModelOptions{})
+	_, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("audio/wav", "https://example.com/audio.wav"),
+		)},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "data URI") {
+		t.Fatalf("Generate() error = %v, want data-URI-required error", err)
+	}
+}
+
+func TestTranscriptionModelRejectsUnsupportedAudioType(t *testing.T) {
+	plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("server should not be called")
+	})
+	model := plugin.DefineTranscriptionModel("test", "whisper-1", ai.ModelOptions{})
+	_, err := model.Generate(context.Background(), &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserMessage(
+			ai.NewMediaPart("audio/aac", "data:audio/aac;base64,YXVkaW8="),
+		)},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "unsupported transcription media type") {
+		t.Fatalf("Generate() error = %v, want unsupported-media-type error", err)
+	}
+}
+
 func TestTranslationIgnoresTranscriptionChunkingStrategy(t *testing.T) {
 	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/audio/translations" {
@@ -436,13 +489,21 @@ func TestAudioFilenameNormalizesContentType(t *testing.T) {
 		{contentType: "audio/x-ogg", want: "input.ogg"},
 		{contentType: "audio/x-flac", want: "input.flac"},
 		{contentType: "audio/x-webm", want: "input.webm"},
-		{contentType: "application/octet-stream", want: "input.mp3"},
+		{contentType: "audio/mpga", want: "input.mpga"},
 	} {
 		t.Run(tc.contentType, func(t *testing.T) {
-			if got := audioFilename(tc.contentType); got != tc.want {
+			got, err := audioFilename(tc.contentType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
 				t.Errorf("audioFilename(%q) = %q, want %q", tc.contentType, got, tc.want)
 			}
 		})
+	}
+
+	if _, err := audioFilename("application/octet-stream"); err == nil {
+		t.Error("audioFilename(application/octet-stream) succeeded, want error")
 	}
 }
 

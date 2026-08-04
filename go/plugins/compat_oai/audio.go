@@ -46,11 +46,17 @@ var (
 		Media:  true,
 		Output: []string{"text", "json"},
 	}
+
+	gptTranscriptionSupports = ai.ModelSupports{
+		Media:  true,
+		Output: []string{"json"},
+	}
 )
 
 // SpeechConfig configures an OpenAI-compatible text-to-speech request.
 type SpeechConfig struct {
 	Voice          openai.AudioSpeechNewParamsVoice          `json:"voice,omitempty" jsonschema:"enum=alloy,enum=ash,enum=ballad,enum=coral,enum=echo,enum=fable,enum=onyx,enum=nova,enum=sage,enum=shimmer,enum=verse,default=alloy"`
+	Instructions   string                                    `json:"instructions,omitempty"`
 	Speed          float64                                   `json:"speed,omitempty" jsonschema:"minimum=0.25,maximum=4"`
 	ResponseFormat openai.AudioSpeechNewParamsResponseFormat `json:"response_format,omitempty" jsonschema:"enum=mp3,enum=opus,enum=aac,enum=flac,enum=wav,enum=pcm"`
 	Version        string                                    `json:"version,omitempty"`
@@ -142,6 +148,9 @@ func (o *OpenAICompatible) DefineSpeechModel(provider, id string, opts ai.ModelO
 		if config.Speed != 0 {
 			params.Speed = openai.Float(config.Speed)
 		}
+		if config.Instructions != "" {
+			params.Instructions = openai.String(config.Instructions)
+		}
 
 		res, err := o.client.Audio.Speech.New(ctx, params)
 		if err != nil {
@@ -180,7 +189,11 @@ func (o *OpenAICompatible) DefineTranscriptionModel(provider, id string, opts ai
 	}
 
 	if opts.Supports == nil {
-		opts.Supports = &TranscriptionSupports
+		if isGPTTranscriptionModel(id) {
+			opts.Supports = &gptTranscriptionSupports
+		} else {
+			opts.Supports = &TranscriptionSupports
+		}
 	}
 	if opts.ConfigSchema == nil {
 		opts.ConfigSchema = transcriptionConfigSchema(id)
@@ -250,9 +263,16 @@ func (o *OpenAICompatible) generateTranscription(
 	if err != nil {
 		return nil, err
 	}
+	if !strings.HasPrefix(media.Text, "data:") {
+		return nil, errors.New("transcription audio must use a data URI")
+	}
 	contentType, audio, err := uri.Data(media)
 	if err != nil {
 		return nil, fmt.Errorf("read transcription media: %w", err)
+	}
+	filename, err := audioFilename(contentType)
+	if err != nil {
+		return nil, err
 	}
 
 	model := id
@@ -273,7 +293,7 @@ func (o *OpenAICompatible) generateTranscription(
 
 	file := &audioFile{
 		Reader:      bytes.NewReader(audio),
-		filename:    audioFilename(contentType),
+		filename:    filename,
 		contentType: contentType,
 	}
 	if translate {
@@ -507,7 +527,7 @@ type audioFile struct {
 func (f *audioFile) Filename() string    { return f.filename }
 func (f *audioFile) ContentType() string { return f.contentType }
 
-func audioFilename(contentType string) string {
+func audioFilename(contentType string) (string, error) {
 	if idx := strings.IndexByte(contentType, ';'); idx >= 0 {
 		contentType = contentType[:idx]
 	}
@@ -516,6 +536,8 @@ func audioFilename(contentType string) string {
 		"audio/mpeg":   ".mp3",
 		"audio/mp3":    ".mp3",
 		"audio/x-mp3":  ".mp3",
+		"audio/mpga":   ".mpga",
+		"audio/x-mpga": ".mpga",
 		"audio/mp4":    ".mp4",
 		"audio/m4a":    ".m4a",
 		"audio/x-m4a":  ".m4a",
@@ -531,7 +553,7 @@ func audioFilename(contentType string) string {
 	}
 	extension := extensions[contentType]
 	if extension == "" {
-		extension = ".mp3"
+		return "", fmt.Errorf("unsupported transcription media type %q", contentType)
 	}
-	return "input" + extension
+	return "input" + extension, nil
 }

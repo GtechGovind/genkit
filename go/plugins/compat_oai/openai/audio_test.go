@@ -66,13 +66,44 @@ func TestAudioModelsRegistered(t *testing.T) {
 }
 
 func TestGPT4oMiniTTSSchemaOmitsSpeed(t *testing.T) {
-	schema := supportedSpeechModels["gpt-4o-mini-tts"].ConfigSchema
+	plugin := &OpenAI{APIKey: "test-key"}
+	actions := plugin.Init(context.Background())
+	var schema map[string]any
+	for _, action := range actions {
+		if action.Name() == "openai/gpt-4o-mini-tts" {
+			inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
+			schema = inputProperties["config"].(map[string]any)
+			break
+		}
+	}
+	if schema == nil {
+		t.Fatal("gpt-4o-mini-tts was not registered")
+	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("schema properties = %#v, want map", schema["properties"])
 	}
 	if _, ok := properties["speed"]; ok {
 		t.Error("gpt-4o-mini-tts schema unexpectedly includes speed")
+	}
+	if properties["instructions"] == nil {
+		t.Error("gpt-4o-mini-tts schema has no instructions property")
+	}
+}
+
+func TestLegacyTTSSchemasOmitInstructions(t *testing.T) {
+	plugin := &OpenAI{APIKey: "test-key"}
+	actions := plugin.Init(context.Background())
+	for _, action := range actions {
+		if action.Name() != "openai/tts-1" && action.Name() != "openai/tts-1-hd" {
+			continue
+		}
+		inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
+		schema := inputProperties["config"].(map[string]any)
+		properties := schema["properties"].(map[string]any)
+		if properties["instructions"] != nil {
+			t.Errorf("%s schema unexpectedly includes instructions", action.Name())
+		}
 	}
 }
 
@@ -134,6 +165,11 @@ func TestGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
 			if got := responseFormat["enum"]; !slices.Equal(got.([]any), []any{"json"}) {
 				t.Errorf("response_format enum = %#v, want [json]", got)
 			}
+			metadata := action.Desc().Metadata["model"].(map[string]any)
+			supports := metadata["supports"].(map[string]any)
+			if got := supports["output"]; !slices.Equal(got.([]string), []string{"json"}) {
+				t.Errorf("output support = %#v, want [json]", got)
+			}
 		})
 	}
 }
@@ -170,6 +206,23 @@ func TestWhisperSchemaIncludesTranslate(t *testing.T) {
 	if got := translate["default"]; got != false {
 		t.Errorf("translate default = %v, want false", got)
 	}
+}
+
+func TestWhisperSupportsTextAndJSON(t *testing.T) {
+	plugin := &OpenAI{APIKey: "test-key"}
+	actions := plugin.Init(context.Background())
+	for _, action := range actions {
+		if action.Name() != "openai/whisper-1" {
+			continue
+		}
+		metadata := action.Desc().Metadata["model"].(map[string]any)
+		supports := metadata["supports"].(map[string]any)
+		if got := supports["output"]; !slices.Equal(got.([]string), []string{"text", "json"}) {
+			t.Errorf("output support = %#v, want [text json]", got)
+		}
+		return
+	}
+	t.Fatal("whisper-1 was not registered")
 }
 
 func TestWhisperModelTranslation(t *testing.T) {
@@ -252,7 +305,8 @@ func TestListActionsClassifiesAudioModels(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"object":"list","data":[`+
 			`{"id":"future-tts","object":"model","created":1,"owned_by":"openai"},`+
-			`{"id":"future-transcribe","object":"model","created":1,"owned_by":"openai"}]}`)
+			`{"id":"future-transcribe","object":"model","created":1,"owned_by":"openai"},`+
+			`{"id":"gpt-4o-transcribe-2026-01-01","object":"model","created":1,"owned_by":"openai"}]}`)
 	}))
 	t.Cleanup(server.Close)
 	plugin := &OpenAI{
@@ -261,8 +315,8 @@ func TestListActionsClassifiesAudioModels(t *testing.T) {
 	}
 	plugin.Init(context.Background())
 	actions := plugin.ListActions(context.Background())
-	if len(actions) != 2 {
-		t.Fatalf("ListActions() returned %d actions, want 2", len(actions))
+	if len(actions) != 3 {
+		t.Fatalf("ListActions() returned %d actions, want 3", len(actions))
 	}
 	for _, action := range actions {
 		modelMetadata := action.Metadata["model"].(map[string]any)
@@ -273,6 +327,9 @@ func TestListActionsClassifiesAudioModels(t *testing.T) {
 		}
 		if action.Name == "openai/future-transcribe" && (output[0] != "text" || supports["media"] != true) {
 			t.Errorf("transcription supports = %#v, want media input and text output", supports)
+		}
+		if action.Name == "openai/gpt-4o-transcribe-2026-01-01" && !slices.Equal(output, []string{"json"}) {
+			t.Errorf("GPT transcription output = %#v, want [json]", output)
 		}
 		properties, ok := action.InputSchema["properties"].(map[string]any)
 		if !ok {

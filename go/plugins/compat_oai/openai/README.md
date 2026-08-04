@@ -43,6 +43,8 @@ resp, err = genkit.Generate(ctx, g,
 
 The plugin registers `tts-1`, `tts-1-hd`, and `gpt-4o-mini-tts` as Genkit
 models. Speech responses contain a base64 data URI in a media part.
+`gpt-4o-mini-tts` also accepts `Instructions` for controlling delivery; the
+legacy TTS models do not expose this option.
 
 ```go
 resp, err := genkit.Generate(ctx, g,
@@ -58,10 +60,12 @@ resp, err := genkit.Generate(ctx, g,
 ## Speech to text
 
 The plugin registers `whisper-1`, `gpt-4o-transcribe`, and
-`gpt-4o-mini-transcribe`. Supply audio as a media part; an optional text part in
-the same message is sent as the transcription prompt. Set `Translate: true` in
-`WhisperConfig` to translate Whisper input into English instead of transcribing
-it in the source language.
+`gpt-4o-mini-transcribe`. Supply audio as a data URI media part; remote media
+URIs and unsupported audio types are rejected. An optional text part in the
+same message is sent as the transcription prompt. GPT transcription models
+return JSON, while Whisper supports text and JSON output. Set `Translate: true`
+in `WhisperConfig` to translate Whisper input into English instead of
+transcribing it in the source language.
 
 ```go
 resp, err := genkit.Generate(ctx, g,

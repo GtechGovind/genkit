@@ -165,28 +165,26 @@ var (
 		openaiGo.SpeechModelTTS1: {
 			Label:        "OpenAI TTS 1",
 			Supports:     &compat_oai.SpeechSupports,
-			ConfigSchema: core.InferSchemaMap(compat_oai.SpeechConfig{}),
+			ConfigSchema: openAISpeechConfigSchema(openaiGo.SpeechModelTTS1),
 		},
 		openaiGo.SpeechModelTTS1HD: {
 			Label:        "OpenAI TTS 1 HD",
 			Supports:     &compat_oai.SpeechSupports,
-			ConfigSchema: core.InferSchemaMap(compat_oai.SpeechConfig{}),
+			ConfigSchema: openAISpeechConfigSchema(openaiGo.SpeechModelTTS1HD),
 		},
 		openaiGo.SpeechModelGPT4oMiniTTS: {
 			Label:        "OpenAI GPT-4o Mini TTS",
 			Supports:     &compat_oai.SpeechSupports,
-			ConfigSchema: speechConfigSchemaWithoutSpeed(),
+			ConfigSchema: openAISpeechConfigSchema(openaiGo.SpeechModelGPT4oMiniTTS),
 		},
 	}
 
 	supportedTranscriptionModels = map[string]ai.ModelOptions{
 		openaiGo.AudioModelGPT4oTranscribe: {
-			Label:    "OpenAI GPT-4o Transcribe",
-			Supports: &compat_oai.TranscriptionSupports,
+			Label: "OpenAI GPT-4o Transcribe",
 		},
 		openaiGo.AudioModelGPT4oMiniTranscribe: {
-			Label:    "OpenAI GPT-4o Mini Transcribe",
-			Supports: &compat_oai.TranscriptionSupports,
+			Label: "OpenAI GPT-4o Mini Transcribe",
 		},
 	}
 
@@ -199,8 +197,17 @@ var (
 	}
 )
 
-func speechConfigSchemaWithoutSpeed() map[string]any {
-	return schemaWithoutProperty(core.InferSchemaMap(compat_oai.SpeechConfig{}), "speed")
+func openAISpeechConfigSchema(model string) map[string]any {
+	schema := core.InferSchemaMap(compat_oai.SpeechConfig{})
+	if isGPT4oMiniTTSModel(model) {
+		return schemaWithoutProperty(schema, "speed")
+	}
+	return schemaWithoutProperty(schema, "instructions")
+}
+
+func isGPT4oMiniTTSModel(model string) bool {
+	base := string(openaiGo.SpeechModelGPT4oMiniTTS)
+	return model == base || strings.HasPrefix(model, base+"-")
 }
 
 func schemaWithoutProperty(schema map[string]any, property string) map[string]any {
@@ -300,6 +307,9 @@ func (o *OpenAI) DefineModel(id string, opts ai.ModelOptions) ai.Model {
 
 // DefineSpeechModel defines an OpenAI text-to-speech model.
 func (o *OpenAI) DefineSpeechModel(id string, opts ai.ModelOptions) ai.Model {
+	if opts.ConfigSchema == nil {
+		opts.ConfigSchema = openAISpeechConfigSchema(id)
+	}
 	return o.openAICompatible.DefineSpeechModel(provider, id, opts)
 }
 
@@ -373,7 +383,7 @@ func audioModelOptions(name string) (ai.ModelOptions, string, bool) {
 		return ai.ModelOptions{
 			Label:        fmt.Sprintf("OpenAI %s", name),
 			Supports:     &compat_oai.SpeechSupports,
-			ConfigSchema: core.InferSchemaMap(compat_oai.SpeechConfig{}),
+			ConfigSchema: openAISpeechConfigSchema(name),
 		}, "speech", true
 	}
 	if strings.Contains(name, "whisper") {
@@ -385,8 +395,7 @@ func audioModelOptions(name string) (ai.ModelOptions, string, bool) {
 	}
 	if strings.Contains(name, "transcribe") {
 		return ai.ModelOptions{
-			Label:    fmt.Sprintf("OpenAI %s", name),
-			Supports: &compat_oai.TranscriptionSupports,
+			Label: fmt.Sprintf("OpenAI %s", name),
 		}, "transcription", true
 	}
 	return ai.ModelOptions{}, "", false
