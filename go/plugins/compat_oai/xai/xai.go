@@ -27,9 +27,9 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
-// ChatCompletionConfig describes configuration accepted by xAI chat
+// chatCompletionConfig describes the schema accepted by xAI chat
 // completions. WebSearchOptions permits xAI-specific web search fields.
-type ChatCompletionConfig struct {
+type chatCompletionConfig struct {
 	ai.GenerationCommonConfig
 	Deferred         *bool          `json:"deferred,omitempty"`
 	FrequencyPenalty *float64       `json:"frequencyPenalty,omitempty" jsonschema:"minimum=-2,maximum=2"`
@@ -56,32 +56,36 @@ const (
 	ModelGrok2Vision1212 = "grok-2-vision-1212"
 )
 
-var supportedModels = map[string]ai.ModelOptions{
-	ModelGrok3:         modelOptions(ModelGrok3, "xAI Grok 3", false, true, true),
-	ModelGrok3Fast:     modelOptions(ModelGrok3Fast, "xAI Grok 3 Fast", false, true, true),
-	ModelGrok3Mini:     modelOptions(ModelGrok3Mini, "xAI Grok 3 Mini", false, true, true),
-	ModelGrok3MiniFast: modelOptions(ModelGrok3MiniFast, "xAI Grok 3 Mini Fast", false, true, true),
-	ModelGrok2Vision1212: modelOptions(
-		ModelGrok2Vision1212,
-		"xAI Grok 2 Vision 1212",
-		true,
-		false,
-		false,
-	),
-}
+var (
+	textModelSupports = ai.ModelSupports{
+		Multiturn:  true,
+		Tools:      true,
+		SystemRole: true,
+		Media:      false,
+		Output:     []string{"text", "json"},
+	}
+	visionModelSupports = ai.ModelSupports{
+		Multiturn:  false,
+		Tools:      true,
+		SystemRole: false,
+		Media:      true,
+		Output:     []string{"text", "json"},
+	}
+	supportedModels = map[string]ai.ModelOptions{
+		ModelGrok3:           modelOptions(ModelGrok3, "xAI Grok 3", textModelSupports),
+		ModelGrok3Fast:       modelOptions(ModelGrok3Fast, "xAI Grok 3 Fast", textModelSupports),
+		ModelGrok3Mini:       modelOptions(ModelGrok3Mini, "xAI Grok 3 Mini", textModelSupports),
+		ModelGrok3MiniFast:   modelOptions(ModelGrok3MiniFast, "xAI Grok 3 Mini Fast", textModelSupports),
+		ModelGrok2Vision1212: modelOptions(ModelGrok2Vision1212, "xAI Grok 2 Vision 1212", visionModelSupports),
+	}
+)
 
-func modelOptions(id, label string, media, multiturn, systemRole bool) ai.ModelOptions {
+func modelOptions(id, label string, supports ai.ModelSupports) ai.ModelOptions {
 	return ai.ModelOptions{
 		Label:        label,
-		ConfigSchema: core.InferSchemaMap(ChatCompletionConfig{}),
-		Supports: &ai.ModelSupports{
-			Multiturn:  multiturn,
-			Tools:      true,
-			SystemRole: systemRole,
-			Media:      media,
-			Output:     []string{"text", "json"},
-		},
-		Versions: []string{id},
+		ConfigSchema: core.InferSchemaMap(chatCompletionConfig{}),
+		Supports:     &supports,
+		Versions:     []string{id},
 	}
 }
 

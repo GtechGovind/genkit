@@ -41,7 +41,73 @@ func TestPluginRequiresAPIKey(t *testing.T) {
 	(&xai.XAI{}).Init(context.Background())
 }
 
-func TestPluginRegistersModelsAndTranslatesConfig(t *testing.T) {
+func TestPluginRegistersModels(t *testing.T) {
+	ctx := context.Background()
+	plugin := &xai.XAI{APIKey: "test-key"}
+	g := genkit.Init(ctx, genkit.WithPlugins(plugin))
+
+	if got := plugin.Name(); got != "xai" {
+		t.Fatalf("Name() = %q, want xai", got)
+	}
+	for _, tc := range []struct {
+		model          string
+		wantMedia      bool
+		wantMultiturn  bool
+		wantSystemRole bool
+	}{
+		{model: xai.ModelGrok3, wantMultiturn: true, wantSystemRole: true},
+		{model: xai.ModelGrok3Fast, wantMultiturn: true, wantSystemRole: true},
+		{model: xai.ModelGrok3Mini, wantMultiturn: true, wantSystemRole: true},
+		{model: xai.ModelGrok3MiniFast, wantMultiturn: true, wantSystemRole: true},
+		{model: xai.ModelGrok2Vision1212, wantMedia: true},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			model := plugin.Model(g, tc.model)
+			if model == nil {
+				t.Fatalf("Model(%q) = nil", tc.model)
+			}
+			desc := model.(api.Action).Desc()
+			if got, want := desc.Name, "xai/"+tc.model; got != want {
+				t.Errorf("Desc().Name = %q, want %q", got, want)
+			}
+			metadata := desc.Metadata["model"].(map[string]any)
+			supports := metadata["supports"].(map[string]any)
+			for _, support := range []struct {
+				name string
+				want bool
+			}{
+				{name: "media", want: tc.wantMedia},
+				{name: "multiturn", want: tc.wantMultiturn},
+				{name: "systemRole", want: tc.wantSystemRole},
+				{name: "tools", want: true},
+				{name: "toolChoice", want: false},
+			} {
+				got, ok := supports[support.name].(bool)
+				if !ok || got != support.want {
+					t.Errorf("%s support = %v, want %v", support.name, supports[support.name], support.want)
+				}
+			}
+			output, _ := supports["output"].([]string)
+			if !slices.Equal(output, []string{"text", "json"}) {
+				t.Errorf("output = %v, want [text json]", output)
+			}
+		})
+	}
+
+	metadata := plugin.Model(g, xai.ModelGrok3).(api.Action).Desc().Metadata["model"].(map[string]any)
+	properties := metadata["customOptions"].(map[string]any)["properties"].(map[string]any)
+	reasoningEffort := properties["reasoningEffort"].(map[string]any)
+	if enumValues, _ := reasoningEffort["enum"].([]any); !slices.Equal(enumValues, []any{"low", "medium", "high"}) {
+		t.Errorf("reasoningEffort enum = %v, want [low medium high]", enumValues)
+	}
+	for _, name := range []string{"deferred", "webSearchOptions"} {
+		if _, ok := properties[name]; !ok {
+			t.Errorf("config schema is missing %s", name)
+		}
+	}
+}
+
+func TestPluginTranslatesConfig(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -52,28 +118,42 @@ func TestPluginRegistersModelsAndTranslatesConfig(t *testing.T) {
 			t.Errorf("Authorization = %q, want bearer token", got)
 		}
 
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request: %v", err)
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+			return
 		}
-		if got := body["model"]; got != xai.ModelGrok3Mini {
-			t.Errorf("model = %v, want %q", got, xai.ModelGrok3Mini)
+		var body struct {
+			Model            string `json:"model"`
+			Deferred         bool   `json:"deferred"`
+			ReasoningEffort  string `json:"reasoning_effort"`
+			WebSearchOptions struct {
+				SearchContextSize string `json:"search_context_size"`
+			} `json:"web_search_options"`
 		}
-		if got := body["deferred"]; got != true {
-			t.Errorf("deferred = %v, want true", got)
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
 		}
-		if got := body["reasoning_effort"]; got != "high" {
-			t.Errorf("reasoning_effort = %v, want high", got)
+		if body.Model != xai.ModelGrok3Mini {
+			t.Errorf("model = %q, want %q", body.Model, xai.ModelGrok3Mini)
 		}
-		webSearch, ok := body["web_search_options"].(map[string]any)
-		if !ok {
-			t.Fatalf("web_search_options = %#v, want object", body["web_search_options"])
+		if !body.Deferred {
+			t.Error("deferred = false, want true")
 		}
-		if got := webSearch["search_context_size"]; got != "high" {
-			t.Errorf("web_search_options.search_context_size = %v, want high", got)
+		if body.ReasoningEffort != "high" {
+			t.Errorf("reasoning_effort = %q, want high", body.ReasoningEffort)
+		}
+		if got := body.WebSearchOptions.SearchContextSize; got != "high" {
+			t.Errorf("web_search_options.search_context_size = %q, want high", got)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Errorf("decode request fields: %v", err)
+			return
 		}
 		for _, name := range []string{"reasoningEffort", "webSearchOptions"} {
-			if _, ok := body[name]; ok {
+			if _, ok := fields[name]; ok {
 				t.Errorf("request contains unconverted %s field", name)
 			}
 		}
@@ -101,72 +181,6 @@ func TestPluginRegistersModelsAndTranslatesConfig(t *testing.T) {
 		genkit.WithPlugins(plugin),
 		genkit.WithDefaultModel("xai/"+xai.ModelGrok3Mini),
 	)
-
-	if got := plugin.Name(); got != "xai" {
-		t.Fatalf("Name() = %q, want xai", got)
-	}
-	textModels := []string{
-		xai.ModelGrok3,
-		xai.ModelGrok3Fast,
-		xai.ModelGrok3Mini,
-		xai.ModelGrok3MiniFast,
-	}
-	visionModels := []string{xai.ModelGrok2Vision1212}
-	for _, group := range []struct {
-		models         []string
-		wantMedia      bool
-		wantMultiturn  bool
-		wantSystemRole bool
-	}{
-		{models: textModels, wantMedia: false, wantMultiturn: true, wantSystemRole: true},
-		{models: visionModels, wantMedia: true, wantMultiturn: false, wantSystemRole: false},
-	} {
-		for _, modelID := range group.models {
-			model := plugin.Model(g, modelID)
-			if model == nil {
-				t.Errorf("Model(%q) = nil", modelID)
-				continue
-			}
-			desc := model.(api.Action).Desc()
-			if got, want := desc.Name, "xai/"+modelID; got != want {
-				t.Errorf("%s Desc().Name = %q, want %q", modelID, got, want)
-			}
-			metadata := desc.Metadata["model"].(map[string]any)
-			supports := metadata["supports"].(map[string]any)
-			for name, check := range map[string]struct {
-				got  any
-				want any
-			}{
-				"media":      {got: supports["media"], want: group.wantMedia},
-				"multiturn":  {got: supports["multiturn"], want: group.wantMultiturn},
-				"systemRole": {got: supports["systemRole"], want: group.wantSystemRole},
-				"tools":      {got: supports["tools"], want: true},
-				"toolChoice": {got: supports["toolChoice"], want: false},
-			} {
-				if check.got != check.want {
-					t.Errorf("%s %s support = %v, want %v", modelID, name, check.got, check.want)
-				}
-			}
-			output, _ := supports["output"].([]string)
-			if !slices.Equal(output, []string{"text", "json"}) {
-				t.Errorf("%s output = %v, want [text json]", modelID, output)
-			}
-
-			configSchema := metadata["customOptions"].(map[string]any)
-			properties := configSchema["properties"].(map[string]any)
-			reasoningEffort := properties["reasoningEffort"].(map[string]any)
-			enumValues, _ := reasoningEffort["enum"].([]any)
-			if !slices.Equal(enumValues, []any{"low", "medium", "high"}) {
-				t.Errorf("%s reasoningEffort enum = %v, want [low medium high]", modelID, enumValues)
-			}
-			if _, ok := properties["deferred"]; !ok {
-				t.Errorf("%s config schema is missing deferred", modelID)
-			}
-			if _, ok := properties["webSearchOptions"]; !ok {
-				t.Errorf("%s config schema is missing webSearchOptions", modelID)
-			}
-		}
-	}
 
 	resp, err := genkit.Generate(
 		ctx,

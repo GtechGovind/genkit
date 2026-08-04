@@ -196,7 +196,6 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		openaiConfig = *cfg
 	case map[string]any:
 		normalizedConfig := make(map[string]any, len(cfg))
-		providerFields := make(map[string]struct{}, len(g.configAliases))
 		for key, value := range cfg {
 			normalizedConfig[key] = value
 		}
@@ -217,7 +216,6 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 			if value, ok := normalizedConfig[source]; ok {
 				normalizedConfig[target] = value
 				delete(normalizedConfig, source)
-				providerFields[target] = struct{}{}
 			}
 		}
 		// These Genkit common fields are handled outside the provider request
@@ -240,8 +238,7 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		// are excluded to prevent config from overriding request construction.
 		extraFields := make(map[string]any, len(normalizedConfig))
 		for key, value := range normalizedConfig {
-			_, providerField := providerFields[key]
-			if _, standard := chatCompletionParamFields[key]; standard && !providerField {
+			if _, standard := chatCompletionParamFields[key]; standard {
 				continue
 			}
 			extraFields[key] = value
