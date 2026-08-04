@@ -55,7 +55,6 @@ class DeepSeekConfig(OpenAIConfig):
     max_tokens: int | None = Field(
         default=None,
         ge=1,
-        le=8192,
         validation_alias='maxTokens',
         serialization_alias='max_tokens',
     )
@@ -64,12 +63,29 @@ class DeepSeekConfig(OpenAIConfig):
 def _normalize_config(config: object) -> DeepSeekConfig:
     """Normalize common and provider-specific fields for DeepSeek."""
     if isinstance(config, DeepSeekConfig):
-        return config
+        config_data = config.model_dump(exclude_none=True)
+    else:
+        normalized = OpenAIModel.normalize_config(config)
+        config_data = normalized.model_dump(exclude_none=True)
+        if isinstance(config, ModelConfig) and config.model_extra:
+            config_data.update(config.model_extra)
 
-    normalized = OpenAIModel.normalize_config(config)
-    config_data = normalized.model_dump(exclude_none=True)
-    if isinstance(config, ModelConfig) and config.model_extra:
-        config_data.update(config.model_extra)
+    max_tokens = config_data.pop('max_tokens', None)
+    if max_tokens is None:
+        max_tokens = config_data.pop('maxTokens', None)
+    else:
+        config_data.pop('maxTokens', None)
+
+    max_completion_tokens = config_data.pop('max_completion_tokens', None)
+    if max_completion_tokens is None:
+        max_completion_tokens = config_data.pop('maxCompletionTokens', None)
+    else:
+        config_data.pop('maxCompletionTokens', None)
+
+    resolved_max_tokens = max_tokens if max_tokens is not None else max_completion_tokens
+    if resolved_max_tokens is not None:
+        config_data['max_tokens'] = resolved_max_tokens
+
     return DeepSeekConfig.model_validate(config_data)
 
 
