@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from openai import AsyncOpenAI
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field
 
 from genkit import ModelConfig, ModelInfo, ModelRequest, ModelResponse, Supports
 from genkit.model import model_action_metadata
@@ -35,7 +35,7 @@ from genkit.plugin_api import (
     to_json_schema,
 )
 from genkit_openai.models import OpenAIImageModel, OpenAIModel, OpenAIModelHandler
-from genkit_openai.typing import OpenAIConfig, ReasoningEffort
+from genkit_openai.typing import OpenAIConfig
 
 XAI_PLUGIN_NAME = 'xai'
 XAI_API_BASE_URL = 'https://api.x.ai/v1'
@@ -76,29 +76,16 @@ class XAIConfig(OpenAIConfig):
     """Configuration for xAI chat-completion models."""
 
     deferred: bool | None = None
-    reasoning_effort: ReasoningEffort | None = Field(
+    reasoning_effort: Literal['low', 'medium', 'high'] | None = Field(
         default=None,
         validation_alias='reasoningEffort',
         serialization_alias='reasoning_effort',
-        json_schema_extra={
-            'anyOf': [
-                {'enum': ['low', 'medium', 'high'], 'type': 'string'},
-                {'type': 'null'},
-            ],
-        },
     )
     web_search_options: dict[str, object] | None = Field(
         default=None,
         validation_alias='webSearchOptions',
         serialization_alias='web_search_options',
     )
-
-    @field_validator('reasoning_effort')
-    @classmethod
-    def _validate_reasoning_effort(cls, value: ReasoningEffort | None) -> ReasoningEffort | None:
-        if value not in {None, ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH}:
-            raise ValueError('xAI reasoning_effort must be low, medium, or high')
-        return value
 
 
 class XAIImageConfig(ModelConfig):
@@ -158,11 +145,17 @@ class _XAIChatModel(OpenAIModel):
     async def _get_openai_request_config(self, request: ModelRequest) -> dict[str, Any]:
         config = await super()._get_openai_request_config(request)
         deferred = config.pop('deferred', None)
+        has_snake_case_extra_body = 'extra_body' in config
+        extra_body = config.pop('extra_body', None)
+        camel_case_extra_body = config.pop('extraBody', None)
+        if not has_snake_case_extra_body:
+            extra_body = camel_case_extra_body
+        if extra_body is not None and not isinstance(extra_body, dict):
+            raise ValueError('XAIConfig extra_body must be a dictionary.')
         if deferred is not None:
-            extra_body = config.get('extra_body')
-            if extra_body is not None and not isinstance(extra_body, dict):
-                raise ValueError('XAIConfig extra_body must be a dictionary.')
-            config['extra_body'] = {**(extra_body or {}), 'deferred': deferred}
+            extra_body = {**(extra_body or {}), 'deferred': deferred}
+        if extra_body is not None:
+            config['extra_body'] = extra_body
         return config
 
 
