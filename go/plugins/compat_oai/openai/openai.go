@@ -16,7 +16,9 @@ package openai
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core"
@@ -157,7 +159,54 @@ var (
 			},
 		},
 	}
+
+	supportedSpeechModels = map[string]ai.ModelOptions{
+		openaiGo.SpeechModelTTS1: {
+			Label:        "OpenAI TTS 1",
+			Supports:     &compat_oai.SpeechSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.SpeechConfig{}),
+		},
+		openaiGo.SpeechModelTTS1HD: {
+			Label:        "OpenAI TTS 1 HD",
+			Supports:     &compat_oai.SpeechSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.SpeechConfig{}),
+		},
+		openaiGo.SpeechModelGPT4oMiniTTS: {
+			Label:        "OpenAI GPT-4o Mini TTS",
+			Supports:     &compat_oai.SpeechSupports,
+			ConfigSchema: speechConfigSchemaWithoutSpeed(),
+		},
+	}
+
+	supportedTranscriptionModels = map[string]ai.ModelOptions{
+		openaiGo.AudioModelGPT4oTranscribe: {
+			Label:        "OpenAI GPT-4o Transcribe",
+			Supports:     &compat_oai.TranscriptionSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.TranscriptionConfig{}),
+		},
+		openaiGo.AudioModelGPT4oMiniTranscribe: {
+			Label:        "OpenAI GPT-4o Mini Transcribe",
+			Supports:     &compat_oai.TranscriptionSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.TranscriptionConfig{}),
+		},
+	}
+
+	supportedWhisperModels = map[string]ai.ModelOptions{
+		openaiGo.AudioModelWhisper1: {
+			Label:        "OpenAI Whisper 1",
+			Supports:     &compat_oai.TranscriptionSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.WhisperConfig{}),
+		},
+	}
 )
+
+func speechConfigSchemaWithoutSpeed() map[string]any {
+	schema := core.InferSchemaMap(compat_oai.SpeechConfig{})
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		delete(properties, "speed")
+	}
+	return schema
+}
 
 type OpenAI struct {
 	// APIKey is the API key for the OpenAI API. If empty, the values of the environment variable "OPENAI_API_KEY" will be consulted.
@@ -210,6 +259,15 @@ func (o *OpenAI) Init(ctx context.Context) []api.Action {
 	for model, opts := range supportedModels {
 		actions = append(actions, o.DefineModel(model, opts).(api.Action))
 	}
+	for model, opts := range supportedSpeechModels {
+		actions = append(actions, o.DefineSpeechModel(model, opts).(api.Action))
+	}
+	for model, opts := range supportedTranscriptionModels {
+		actions = append(actions, o.DefineTranscriptionModel(model, opts).(api.Action))
+	}
+	for model, opts := range supportedWhisperModels {
+		actions = append(actions, o.DefineWhisperModel(model, opts).(api.Action))
+	}
 
 	// define default embedders
 	for _, embedder := range supportedEmbeddingModels {
@@ -233,6 +291,21 @@ func (o *OpenAI) DefineModel(id string, opts ai.ModelOptions) ai.Model {
 	return o.openAICompatible.DefineModel(provider, id, opts)
 }
 
+// DefineSpeechModel defines an OpenAI text-to-speech model.
+func (o *OpenAI) DefineSpeechModel(id string, opts ai.ModelOptions) ai.Model {
+	return o.openAICompatible.DefineSpeechModel(provider, id, opts)
+}
+
+// DefineTranscriptionModel defines an OpenAI speech-to-text model.
+func (o *OpenAI) DefineTranscriptionModel(id string, opts ai.ModelOptions) ai.Model {
+	return o.openAICompatible.DefineTranscriptionModel(provider, id, opts)
+}
+
+// DefineWhisperModel defines an OpenAI Whisper transcription and translation model.
+func (o *OpenAI) DefineWhisperModel(id string, opts ai.ModelOptions) ai.Model {
+	return o.openAICompatible.DefineWhisperModel(provider, id, opts)
+}
+
 func (o *OpenAI) DefineEmbedder(id string, opts *ai.EmbedderOptions) ai.Embedder {
 	return o.openAICompatible.DefineEmbedder(provider, id, opts)
 }
@@ -242,9 +315,73 @@ func (o *OpenAI) Embedder(g *genkit.Genkit, name string) ai.Embedder {
 }
 
 func (o *OpenAI) ListActions(ctx context.Context) []api.ActionDesc {
-	return o.openAICompatible.ListActions(ctx)
+	actions := o.openAICompatible.ListActions(ctx)
+	for i := range actions {
+		name := strings.TrimPrefix(actions[i].Name, provider+"/")
+		opts, kind, ok := audioModelOptions(name)
+		if !ok {
+			continue
+		}
+		var model ai.Model
+		switch kind {
+		case "speech":
+			model = o.DefineSpeechModel(name, opts)
+		case "whisper":
+			model = o.DefineWhisperModel(name, opts)
+		default:
+			model = o.DefineTranscriptionModel(name, opts)
+		}
+		actions[i].Metadata = model.(api.Action).Desc().Metadata
+	}
+	return actions
 }
 
 func (o *OpenAI) ResolveAction(atype api.ActionType, name string) api.Action {
+	if atype == api.ActionTypeModel {
+		if opts, kind, ok := audioModelOptions(name); ok {
+			switch kind {
+			case "speech":
+				return o.DefineSpeechModel(name, opts).(api.Action)
+			case "whisper":
+				return o.DefineWhisperModel(name, opts).(api.Action)
+			default:
+				return o.DefineTranscriptionModel(name, opts).(api.Action)
+			}
+		}
+	}
 	return o.openAICompatible.ResolveAction(atype, name)
+}
+
+func audioModelOptions(name string) (ai.ModelOptions, string, bool) {
+	if opts, ok := supportedSpeechModels[name]; ok {
+		return opts, "speech", true
+	}
+	if opts, ok := supportedTranscriptionModels[name]; ok {
+		return opts, "transcription", true
+	}
+	if opts, ok := supportedWhisperModels[name]; ok {
+		return opts, "whisper", true
+	}
+	if strings.Contains(name, "tts") {
+		return ai.ModelOptions{
+			Label:        fmt.Sprintf("OpenAI %s", name),
+			Supports:     &compat_oai.SpeechSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.SpeechConfig{}),
+		}, "speech", true
+	}
+	if strings.Contains(name, "whisper") {
+		return ai.ModelOptions{
+			Label:        fmt.Sprintf("OpenAI %s", name),
+			Supports:     &compat_oai.TranscriptionSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.WhisperConfig{}),
+		}, "whisper", true
+	}
+	if strings.Contains(name, "transcribe") {
+		return ai.ModelOptions{
+			Label:        fmt.Sprintf("OpenAI %s", name),
+			Supports:     &compat_oai.TranscriptionSupports,
+			ConfigSchema: core.InferSchemaMap(compat_oai.TranscriptionConfig{}),
+		}, "transcription", true
+	}
+	return ai.ModelOptions{}, "", false
 }
