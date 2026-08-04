@@ -125,6 +125,21 @@ func TestSpeechModelDefaultsVoiceAndFormat(t *testing.T) {
 	}
 }
 
+func TestSpeechModelRejectsEmptyText(t *testing.T) {
+	for _, input := range []string{"", " \t\n"} {
+		plugin := newAudioPlugin(t, func(http.ResponseWriter, *http.Request) {
+			t.Fatal("server should not be called")
+		})
+		model := plugin.DefineSpeechModel("test", "tts-1", ai.ModelOptions{})
+		_, err := model.Generate(context.Background(), &ai.ModelRequest{
+			Messages: []*ai.Message{ai.NewUserTextMessage(input)},
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "non-empty text") {
+			t.Fatalf("Generate() error = %v, want non-empty-text error", err)
+		}
+	}
+}
+
 func TestSpeechModelUnknownFormatUsesBinaryContentType(t *testing.T) {
 	plugin := newAudioPlugin(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("audio"))
@@ -473,6 +488,23 @@ func TestToChunkingStrategy(t *testing.T) {
 				t.Errorf("chunking strategy = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestToChunkingStrategyPreservesTypedValue(t *testing.T) {
+	vad := &openai.AudioTranscriptionNewParamsChunkingStrategyVadConfig{
+		Type: "server_vad",
+	}
+	typed := openai.AudioTranscriptionNewParamsChunkingStrategyUnion{
+		OfAudioTranscriptionNewsChunkingStrategyVadConfig: vad,
+	}
+
+	got, err := toChunkingStrategy(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OfAudioTranscriptionNewsChunkingStrategyVadConfig != vad {
+		t.Error("toChunkingStrategy copied an already typed strategy")
 	}
 }
 

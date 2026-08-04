@@ -130,6 +130,10 @@ func (o *OpenAICompatible) DefineSpeechModel(provider, id string, opts ai.ModelO
 		if len(req.Messages) == 0 || req.Messages[0] == nil {
 			return nil, errors.New("speech request requires a message")
 		}
+		input := req.Messages[0].Text()
+		if strings.TrimSpace(input) == "" {
+			return nil, errors.New("speech request requires non-empty text")
+		}
 
 		voice := config.Voice
 		if voice == "" {
@@ -140,7 +144,7 @@ func (o *OpenAICompatible) DefineSpeechModel(provider, id string, opts ai.ModelO
 			model = config.Version
 		}
 		params := openai.AudioSpeechNewParams{
-			Input:          req.Messages[0].Text(),
+			Input:          input,
 			Model:          model,
 			Voice:          voice,
 			ResponseFormat: config.ResponseFormat,
@@ -373,6 +377,15 @@ func toChunkingStrategy(value any) (openai.AudioTranscriptionNewParamsChunkingSt
 	var result openai.AudioTranscriptionNewParamsChunkingStrategyUnion
 	if value == nil {
 		return result, nil
+	}
+	switch value := value.(type) {
+	case openai.AudioTranscriptionNewParamsChunkingStrategyUnion:
+		return value, nil
+	case *openai.AudioTranscriptionNewParamsChunkingStrategyUnion:
+		if value == nil {
+			return result, nil
+		}
+		return *value, nil
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
