@@ -23,6 +23,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -504,6 +505,19 @@ func TestAudioFilenameNormalizesContentType(t *testing.T) {
 
 	if _, err := audioFilename("application/octet-stream"); err == nil {
 		t.Error("audioFilename(application/octet-stream) succeeded, want error")
+	}
+}
+
+func TestJSONOnlyTranscriptionSchemaHandlesUnexpectedStructure(t *testing.T) {
+	for _, schema := range []map[string]any{
+		nil,
+		{"type": "object"},
+		{"properties": "unexpected"},
+		{"properties": map[string]any{"response_format": "unexpected"}},
+	} {
+		if got := jsonOnlyTranscriptionConfigSchema(schema); !reflect.DeepEqual(got, schema) {
+			t.Errorf("jsonOnlyTranscriptionConfigSchema(%#v) = %#v, want unchanged schema", schema, got)
+		}
 	}
 }
 

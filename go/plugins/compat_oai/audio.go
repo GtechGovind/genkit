@@ -353,7 +353,7 @@ func audioTranscriptionParams(
 		Model:                  model,
 		ChunkingStrategy:       chunkingStrategy,
 		Include:                config.Include,
-		ResponseFormat:         config.ResponseFormat,
+		ResponseFormat:         format,
 		TimestampGranularities: config.TimestampGranularities,
 	}
 	if config.Language != "" {
@@ -366,7 +366,6 @@ func audioTranscriptionParams(
 		params.Temperature = openai.Float(config.Temperature)
 	}
 
-	params.ResponseFormat = format
 	return params, nil
 }
 
@@ -496,10 +495,23 @@ func transcriptionConfigSchema(model string) map[string]any {
 	}
 	// The pinned OpenAI SDK supports only JSON responses for GPT transcription
 	// models, which is intentionally stricter than the current canonical JS schema.
+	return jsonOnlyTranscriptionConfigSchema(schema)
+}
+
+func jsonOnlyTranscriptionConfigSchema(schema map[string]any) map[string]any {
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return schema
+	}
+	responseFormat, ok := properties["response_format"].(map[string]any)
+	if !ok {
+		return schema
+	}
+
 	schema = maps.Clone(schema)
-	properties := maps.Clone(schema["properties"].(map[string]any))
+	properties = maps.Clone(properties)
 	schema["properties"] = properties
-	responseFormat := maps.Clone(properties["response_format"].(map[string]any))
+	responseFormat = maps.Clone(responseFormat)
 	properties["response_format"] = responseFormat
 	responseFormat["enum"] = []any{string(openai.AudioResponseFormatJSON)}
 	responseFormat["default"] = string(openai.AudioResponseFormatJSON)
