@@ -122,7 +122,7 @@ def _is_image_model(name: str) -> bool:
 def _model_info(name: str) -> ModelInfo:
     if _is_image_model(name):
         supports = XAI_IMAGE_SUPPORTS
-    elif name == 'grok-2-vision-1212':
+    elif 'vision' in name:
         supports = XAI_VISION_SUPPORTS
     else:
         supports = XAI_CHAT_SUPPORTS

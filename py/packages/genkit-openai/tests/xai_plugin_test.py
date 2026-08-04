@@ -127,11 +127,14 @@ async def test_resolve_routes_chat_and_image_models_only_as_model_actions() -> N
 
     chat = await plugin.resolve(ActionKind.MODEL, 'xai/grok-custom')
     image = await plugin.resolve(ActionKind.MODEL, 'xai/grok-custom-image')
+    vision = await plugin.resolve(ActionKind.MODEL, 'xai/grok-custom-vision')
 
     assert chat is not None
     assert chat.name == 'xai/grok-custom'
     assert image is not None
     assert image.name == 'xai/grok-custom-image'
+    assert vision is not None
+    assert vision.metadata['model']['supports']['media'] is True
     assert await plugin.resolve(ActionKind.EMBEDDER, 'xai/grok-3') is None
     assert await plugin.resolve(ActionKind.MODEL, 'openai/gpt-4o') is None
 
@@ -216,14 +219,12 @@ async def test_chat_action_maps_xai_request_extensions_to_api_fields(
     assert action is not None
 
     request = _request()
-    request.config = xai.XAIConfig.model_validate(
-        {
-            'deferred': True,
-            'reasoningEffort': 'high',
-            'webSearchOptions': {'search_context_size': 'high'},
-            **extra_body_config,
-        }
-    )
+    request.config = xai.XAIConfig.model_validate({
+        'deferred': True,
+        'reasoningEffort': 'high',
+        'webSearchOptions': {'search_context_size': 'high'},
+        **extra_body_config,
+    })
     response = (await action.run(request)).response
 
     assert response.text == 'Hello back'
