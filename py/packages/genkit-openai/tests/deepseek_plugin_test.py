@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from genkit import Message, ModelRequest, Part, ReasoningPart, Role, TextPart
+from genkit import GenkitError, Message, ModelRequest, Part, ReasoningPart, Role, TextPart
 from genkit.plugin_api import ActionKind
 
 
@@ -143,6 +143,56 @@ def test_deepseek_config_constrains_max_tokens() -> None:
         deepseek.DeepSeekConfig(max_tokens=0)
     with pytest.raises(ValidationError):
         deepseek.DeepSeekConfig(max_tokens=8193)
+
+
+@pytest.mark.asyncio
+async def test_action_normalizes_camel_case_deepseek_config() -> None:
+    deepseek = _deepseek_module()
+    mock_message = MagicMock(
+        content='Configured answer',
+        reasoning_content=None,
+        role='assistant',
+        tool_calls=None,
+    )
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[MagicMock(message=mock_message)]),
+    )
+
+    plugin = deepseek.DeepSeek(api_key='test-key')
+    plugin._runtime_client = lambda: mock_client
+    action = await plugin.resolve(ActionKind.MODEL, 'deepseek/deepseek-chat')
+    assert action is not None
+    request = ModelRequest.model_validate({
+        **_request().model_dump(by_alias=True),
+        'config': {'maxTokens': 256, 'model': 'deepseek-chat-version'},
+    })
+
+    await action.run(request)
+
+    await_args = mock_client.chat.completions.create.await_args
+    assert await_args is not None
+    assert await_args.kwargs['model'] == 'deepseek-chat-version'
+    assert await_args.kwargs['max_tokens'] == 256
+    assert 'maxTokens' not in await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_action_validates_camel_case_deepseek_config() -> None:
+    deepseek = _deepseek_module()
+    plugin = deepseek.DeepSeek(api_key='test-key')
+    plugin._runtime_client = MagicMock(side_effect=AssertionError('invalid config must be rejected before client use'))
+    action = await plugin.resolve(ActionKind.MODEL, 'deepseek/deepseek-chat')
+    assert action is not None
+    request = ModelRequest.model_validate({
+        **_request().model_dump(by_alias=True),
+        'config': {'maxTokens': 8193},
+    })
+
+    with pytest.raises(GenkitError) as exc_info:
+        await action.run(request)
+
+    assert isinstance(exc_info.value.cause, ValidationError)
 
 
 @pytest.mark.asyncio

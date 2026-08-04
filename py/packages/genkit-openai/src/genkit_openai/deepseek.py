@@ -22,7 +22,7 @@ from typing import Any, cast
 from openai import AsyncOpenAI
 from pydantic import Field
 
-from genkit import ModelInfo, ModelRequest, ModelResponse, Supports
+from genkit import ModelConfig, ModelInfo, ModelRequest, ModelResponse, Supports
 from genkit.model import model_action_metadata
 from genkit.plugin_api import (
     Action,
@@ -59,6 +59,18 @@ class DeepSeekConfig(OpenAIConfig):
         validation_alias='maxTokens',
         serialization_alias='max_tokens',
     )
+
+
+def _normalize_config(config: object) -> DeepSeekConfig:
+    """Normalize common and provider-specific fields for DeepSeek."""
+    if isinstance(config, DeepSeekConfig):
+        return config
+
+    normalized = OpenAIModel.normalize_config(config)
+    config_data = normalized.model_dump(exclude_none=True)
+    if isinstance(config, ModelConfig) and config.model_extra:
+        config_data.update(config.model_extra)
+    return DeepSeekConfig.model_validate(config_data)
 
 
 def deepseek_name(name: str) -> str:
@@ -127,6 +139,7 @@ class DeepSeek(Plugin):
         model_info = _model_info(clean_name)
 
         async def _generate(request: ModelRequest, ctx: ActionRunContext) -> ModelResponse:
+            request.config = _normalize_config(request.config)
             model = OpenAIModel(clean_name, self._runtime_client())
             return await model.generate(request, ctx)
 
