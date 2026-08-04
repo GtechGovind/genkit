@@ -33,7 +33,7 @@ from genkit.plugin_api import (
     loop_local_client,
     to_json_schema,
 )
-from genkit_openai.models import OpenAIModel, OpenAIModelHandler
+from genkit_openai.models import OpenAIModel
 from genkit_openai.typing import OpenAIConfig
 
 DEEPSEEK_PLUGIN_NAME = 'deepseek'
@@ -107,7 +107,7 @@ class DeepSeek(Plugin):
 
     async def resolve(self, action_type: ActionKind, name: str) -> Action | None:
         """Resolve a DeepSeek model action."""
-        if action_type != ActionKind.MODEL:
+        if action_type != ActionKind.MODEL or not name.startswith(f'{DEEPSEEK_PLUGIN_NAME}/'):
             return None
         return self._create_model_action(name)
 
@@ -127,7 +127,7 @@ class DeepSeek(Plugin):
         model_info = _model_info(clean_name)
 
         async def _generate(request: ModelRequest, ctx: ActionRunContext) -> ModelResponse:
-            model = OpenAIModelHandler(OpenAIModel(clean_name, self._runtime_client()))
+            model = OpenAIModel(clean_name, self._runtime_client())
             return await model.generate(request, ctx)
 
         return Action(

@@ -87,6 +87,11 @@ async def test_resolve_only_handles_model_actions() -> None:
     assert action is not None
     assert action.name == 'deepseek/deepseek-reasoner'
     assert await plugin.resolve(ActionKind.EMBEDDER, 'deepseek/deepseek-reasoner') is None
+    assert await plugin.resolve(ActionKind.MODEL, 'openai/gpt-4o') is None
+
+    dynamic = await plugin.resolve(ActionKind.MODEL, 'deepseek/custom-model')
+    assert dynamic is not None
+    assert dynamic.name == 'deepseek/custom-model'
 
 
 def test_client_uses_canonical_base_url_and_explicit_key() -> None:
@@ -159,7 +164,10 @@ async def test_reasoner_action_uses_shared_runtime_reasoning_conversion() -> Non
     assert action is not None
 
     request = _request()
-    request.config = deepseek.DeepSeekConfig(max_tokens=256)
+    request.config = deepseek.DeepSeekConfig(
+        max_tokens=256,
+        model='deepseek-reasoner-version',
+    )
     response = (await action.run(request)).response
 
     assert response.message is not None
@@ -169,7 +177,7 @@ async def test_reasoner_action_uses_shared_runtime_reasoning_conversion() -> Non
     assert response.message.content[1].root.text == 'Final answer'
     await_args = mock_client.chat.completions.create.await_args
     assert await_args is not None
-    assert await_args.kwargs['model'] == 'deepseek-reasoner'
+    assert await_args.kwargs['model'] == 'deepseek-reasoner-version'
     assert await_args.kwargs['max_tokens'] == 256
     assert 'maxTokens' not in await_args.kwargs
 
