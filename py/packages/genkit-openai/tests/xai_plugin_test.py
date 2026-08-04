@@ -66,7 +66,7 @@ async def test_init_registers_exact_canonical_models_with_provider_metadata() ->
         assert action.metadata['model']['supports'] == standard_supports
 
     assert actions[4].metadata['model']['supports'] == {
-        'multiturn': True,
+        'multiturn': False,
         'media': True,
         'tools': True,
         'systemRole': False,

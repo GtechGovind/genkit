@@ -57,7 +57,7 @@ XAI_CHAT_SUPPORTS = Supports(
     output=['text', 'json'],
 )
 XAI_VISION_SUPPORTS = Supports(
-    multiturn=True,
+    multiturn=False,
     media=True,
     tools=True,
     system_role=False,
