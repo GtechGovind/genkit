@@ -96,11 +96,11 @@ async def test_model_metadata_exposes_xai_specific_config_schemas() -> None:
     assert web_search_schema['type'] == 'object'
 
     image_properties = actions[-1].metadata['model']['customOptions']['properties']
-    assert {'size', 'style', 'user', 'n', 'quality', 'response_format'} <= set(image_properties)
+    assert {'size', 'style', 'user', 'n', 'quality', 'responseFormat'} <= set(image_properties)
     assert image_properties['n']['default'] == 1
     assert image_properties['n']['minimum'] == 1
     assert image_properties['n']['maximum'] == 10
-    assert image_properties['response_format']['default'] == 'b64_json'
+    assert image_properties['responseFormat']['default'] == 'b64_json'
 
 
 @pytest.mark.asyncio
@@ -179,10 +179,13 @@ def test_xai_config_rejects_unsupported_reasoning_effort_and_image_count() -> No
     assert xai.XAIImageConfig(n=1).n == 1
     assert xai.XAIImageConfig(n=10).n == 10
     assert isinstance(xai.XAIImageConfig(), ModelConfig)
+    assert xai.XAIImageConfig(max_output_tokens=100).max_output_tokens == 100
     with pytest.raises(ValidationError):
         xai.XAIImageConfig(n=0)
     with pytest.raises(ValidationError):
         xai.XAIImageConfig(n=11)
+    with pytest.raises(ValidationError, match='extra_forbidden'):
+        xai.XAIImageConfig.model_validate({'unknownImageOption': True})
 
 
 @pytest.mark.asyncio
@@ -230,7 +233,8 @@ def test_chat_model_normalizes_dictionary_config_as_xai_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_image_action_uses_shared_image_runtime() -> None:
+@pytest.mark.parametrize('response_format_key', ['responseFormat', 'response_format'])
+async def test_image_action_uses_shared_image_runtime(response_format_key: str) -> None:
     xai = _xai_module()
     mock_image = MagicMock(url='https://example.com/grok.png', b64_json=None)
     mock_client = MagicMock()
@@ -242,7 +246,9 @@ async def test_image_action_uses_shared_image_runtime() -> None:
     assert action is not None
 
     request = _request('Draw a rocket')
-    request.config = xai.XAIImageConfig(size='1024x1024', n=1, response_format='url')
+    request.config = xai.XAIImageConfig.model_validate(
+        {'size': '1024x1024', 'n': 1, response_format_key: 'url'},
+    )
     response = (await action.run(request)).response
 
     await_args = mock_client.images.generate.await_args

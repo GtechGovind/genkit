@@ -111,7 +111,11 @@ class XAIImageConfig(ModelConfig):
     user: str | None = None
     n: int = Field(default=1, ge=1, le=10)
     quality: Literal['standard', 'hd'] | None = None
-    response_format: Literal['b64_json', 'url'] | None = Field(default='b64_json', alias='response_format')
+    response_format: Literal['b64_json', 'url'] | None = Field(
+        default='b64_json',
+        validation_alias='responseFormat',
+        serialization_alias='response_format',
+    )
 
 
 def xai_name(name: str) -> str:
