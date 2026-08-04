@@ -60,7 +60,7 @@ async def test_init_registers_exactly_the_two_canonical_models() -> None:
         max_tokens = model_metadata['customOptions']['properties']['maxTokens']
         integer_schema = next(schema for schema in max_tokens['anyOf'] if schema.get('type') == 'integer')
         assert integer_schema['minimum'] == 1
-        assert integer_schema['maximum'] == 8192
+        assert 'maximum' not in integer_schema
 
 
 @pytest.mark.asyncio
@@ -139,10 +139,9 @@ def test_deepseek_config_constrains_max_tokens() -> None:
 
     assert deepseek.DeepSeekConfig(max_tokens=1).max_tokens == 1
     assert deepseek.DeepSeekConfig(max_tokens=8192).max_tokens == 8192
+    assert deepseek.DeepSeekConfig(max_tokens=8193).max_tokens == 8193
     with pytest.raises(ValidationError):
         deepseek.DeepSeekConfig(max_tokens=0)
-    with pytest.raises(ValidationError):
-        deepseek.DeepSeekConfig(max_tokens=8193)
 
 
 @pytest.mark.asyncio
@@ -178,7 +177,51 @@ async def test_action_normalizes_camel_case_deepseek_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_action_validates_camel_case_deepseek_config() -> None:
+@pytest.mark.parametrize(
+    ('config', 'expected_max_tokens'),
+    [
+        ({'max_completion_tokens': 512}, 512),
+        ({'maxCompletionTokens': 768}, 768),
+        ({'max_tokens': 256, 'maxCompletionTokens': 512}, 256),
+        ({'maxTokens': 384, 'max_completion_tokens': 768}, 384),
+    ],
+)
+async def test_action_maps_max_completion_tokens_to_max_tokens(
+    config: dict[str, int],
+    expected_max_tokens: int,
+) -> None:
+    deepseek = _deepseek_module()
+    mock_message = MagicMock(
+        content='Configured answer',
+        reasoning_content=None,
+        role='assistant',
+        tool_calls=None,
+    )
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=MagicMock(choices=[MagicMock(message=mock_message)]),
+    )
+
+    plugin = deepseek.DeepSeek(api_key='test-key')
+    plugin._runtime_client = lambda: mock_client
+    action = await plugin.resolve(ActionKind.MODEL, 'deepseek/deepseek-chat')
+    assert action is not None
+    request = ModelRequest.model_validate({
+        **_request().model_dump(by_alias=True),
+        'config': config,
+    })
+
+    await action.run(request)
+
+    await_args = mock_client.chat.completions.create.await_args
+    assert await_args is not None
+    assert await_args.kwargs['max_tokens'] == expected_max_tokens
+    assert 'max_completion_tokens' not in await_args.kwargs
+    assert 'maxCompletionTokens' not in await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_action_validates_mapped_max_completion_tokens() -> None:
     deepseek = _deepseek_module()
     plugin = deepseek.DeepSeek(api_key='test-key')
     plugin._runtime_client = MagicMock(side_effect=AssertionError('invalid config must be rejected before client use'))
@@ -186,7 +229,7 @@ async def test_action_validates_camel_case_deepseek_config() -> None:
     assert action is not None
     request = ModelRequest.model_validate({
         **_request().model_dump(by_alias=True),
-        'config': {'maxTokens': 8193},
+        'config': {'maxCompletionTokens': 0},
     })
 
     with pytest.raises(GenkitError) as exc_info:
