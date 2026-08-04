@@ -189,7 +189,21 @@ def test_xai_config_rejects_unsupported_reasoning_effort_and_image_count() -> No
 
 
 @pytest.mark.asyncio
-async def test_chat_action_maps_xai_request_extensions_to_api_fields() -> None:
+@pytest.mark.parametrize(
+    ('extra_body_config', 'expected_extra_body'),
+    [
+        ({'extra_body': {'source': 'snake'}}, {'source': 'snake', 'deferred': True}),
+        ({'extraBody': {'source': 'camel'}}, {'source': 'camel', 'deferred': True}),
+        (
+            {'extra_body': {'source': 'snake'}, 'extraBody': {'source': 'camel'}},
+            {'source': 'snake', 'deferred': True},
+        ),
+    ],
+)
+async def test_chat_action_maps_xai_request_extensions_to_api_fields(
+    extra_body_config: dict[str, object],
+    expected_extra_body: dict[str, object],
+) -> None:
     xai = _xai_module()
     mock_message = MagicMock(content='Hello back', reasoning_content=None, role='assistant', tool_calls=None)
     mock_response = MagicMock(choices=[MagicMock(message=mock_message)])
@@ -202,11 +216,13 @@ async def test_chat_action_maps_xai_request_extensions_to_api_fields() -> None:
     assert action is not None
 
     request = _request()
-    request.config = xai.XAIConfig(
-        deferred=True,
-        reasoning_effort='high',
-        web_search_options={'search_context_size': 'high'},
-        extra_body={'existing': 'preserved'},
+    request.config = xai.XAIConfig.model_validate(
+        {
+            'deferred': True,
+            'reasoningEffort': 'high',
+            'webSearchOptions': {'search_context_size': 'high'},
+            **extra_body_config,
+        }
     )
     response = (await action.run(request)).response
 
@@ -216,8 +232,21 @@ async def test_chat_action_maps_xai_request_extensions_to_api_fields() -> None:
     assert await_args.kwargs['model'] == 'grok-3'
     assert await_args.kwargs['reasoning_effort'] == 'high'
     assert await_args.kwargs['web_search_options'] == {'search_context_size': 'high'}
-    assert await_args.kwargs['extra_body'] == {'existing': 'preserved', 'deferred': True}
+    assert await_args.kwargs['extra_body'] == expected_extra_body
+    assert 'extraBody' not in await_args.kwargs
     assert 'deferred' not in await_args.kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extra_body_key', ['extra_body', 'extraBody'])
+async def test_chat_model_rejects_non_dictionary_extra_body(extra_body_key: str) -> None:
+    xai = _xai_module()
+    request = _request()
+    request.config = xai.XAIConfig.model_validate({extra_body_key: 'invalid'})
+    model = xai._XAIChatModel('grok-3', MagicMock())
+
+    with pytest.raises(ValueError, match='extra_body must be a dictionary'):
+        await model._get_openai_request_config(request)
 
 
 def test_chat_model_normalizes_dictionary_config_as_xai_config() -> None:
@@ -228,7 +257,7 @@ def test_chat_model_normalizes_dictionary_config_as_xai_config() -> None:
     assert config.reasoning_effort == 'high'
     assert config.deferred is True
 
-    with pytest.raises(ValidationError, match='reasoning_effort'):
+    with pytest.raises(ValidationError, match='reasoningEffort'):
         xai._XAIChatModel.normalize_config({'reasoningEffort': 'minimal'})
 
 
