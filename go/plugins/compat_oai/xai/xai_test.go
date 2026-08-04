@@ -59,7 +59,7 @@ func TestPluginRegistersModels(t *testing.T) {
 		{model: xai.ModelGrok3Fast, wantMultiturn: true, wantSystemRole: true},
 		{model: xai.ModelGrok3Mini, wantMultiturn: true, wantSystemRole: true},
 		{model: xai.ModelGrok3MiniFast, wantMultiturn: true, wantSystemRole: true},
-		{model: xai.ModelGrok2Vision1212, wantMultiturn: true, wantMedia: true},
+		{model: xai.ModelGrok2Vision1212, wantMedia: true},
 	} {
 		t.Run(tc.model, func(t *testing.T) {
 			model := plugin.Model(g, tc.model)
