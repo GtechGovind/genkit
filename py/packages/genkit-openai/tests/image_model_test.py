@@ -110,6 +110,44 @@ class TestToImageGenerateParams:
         assert 'top_k' not in got
         assert 'top_p' not in got
 
+    @pytest.mark.parametrize(
+        'config',
+        [
+            {
+                'temperature': 0.5,
+                'max_output_tokens': 100,
+                'stop_sequences': ['stop'],
+                'top_k': 40,
+                'top_p': 0.9,
+                'api_key': 'test-key',
+            },
+            {
+                'temperature': 0.5,
+                'maxOutputTokens': 100,
+                'stopSequences': ['stop'],
+                'topK': 40,
+                'topP': 0.9,
+                'apiKey': 'test-key',
+            },
+        ],
+    )
+    def test_strips_standard_genai_config_in_both_naming_conventions(self, config: dict[str, object]) -> None:
+        """Verify snake_case and camelCase GenAI keys never reach the Images API."""
+        request = ModelRequest.model_validate({
+            'messages': [
+                Message(role=Role.USER, content=[Part(root=TextPart(text='test'))]),
+            ],
+            'config': config,
+        })
+
+        got = _to_image_generate_params('dall-e-3', request)
+
+        assert got == {
+            'model': 'dall-e-3',
+            'prompt': 'test',
+            'response_format': 'b64_json',
+        }
+
     def test_version_override(self) -> None:
         """Verify model version override via config."""
         request = ModelRequest(
