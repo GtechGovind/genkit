@@ -97,6 +97,8 @@ func imageGenerateParams(modelName string, input *ai.ModelRequest) (openai.Image
 	// GPT Image always returns base64 and rejects response_format.
 	if strings.Contains(string(params.Model), "gpt-image") {
 		params.ResponseFormat = ""
+		// Style is a DALL-E 3 option and is rejected by GPT Image models.
+		params.Style = ""
 	}
 	return params, nil
 }
@@ -123,7 +125,12 @@ func applyImageGenerationConfig(params *openai.ImageGenerateParams, config Image
 	}
 }
 
-func imageResponse(result *openai.ImagesResponse, input *ai.ModelRequest) *ai.ModelResponse {
+func imageResponse(
+	result *openai.ImagesResponse,
+	input *ai.ModelRequest,
+	format openai.ImageGenerateParamsOutputFormat,
+) *ai.ModelResponse {
+	contentType := imageContentType(format)
 	response := &ai.ModelResponse{
 		FinishReason: ai.FinishReasonStop,
 		Message:      &ai.Message{Role: ai.RoleModel},
@@ -133,13 +140,24 @@ func imageResponse(result *openai.ImagesResponse, input *ai.ModelRequest) *ai.Mo
 	for _, image := range result.Data {
 		url := image.URL
 		if url == "" && image.B64JSON != "" {
-			url = "data:image/png;base64," + image.B64JSON
+			url = "data:" + contentType + ";base64," + image.B64JSON
 		}
 		if url != "" {
-			response.Message.Content = append(response.Message.Content, ai.NewMediaPart("image/png", url))
+			response.Message.Content = append(response.Message.Content, ai.NewMediaPart(contentType, url))
 		}
 	}
 	return response
+}
+
+func imageContentType(format openai.ImageGenerateParamsOutputFormat) string {
+	switch format {
+	case openai.ImageGenerateParamsOutputFormatJPEG:
+		return "image/jpeg"
+	case openai.ImageGenerateParamsOutputFormatWebP:
+		return "image/webp"
+	default:
+		return "image/png"
+	}
 }
 
 func generateImage(
@@ -160,5 +178,5 @@ func generateImage(
 	if err != nil {
 		return nil, err
 	}
-	return imageResponse(result, input), nil
+	return imageResponse(result, input, params.OutputFormat), nil
 }

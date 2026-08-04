@@ -153,6 +153,44 @@ func TestGenerateImage(t *testing.T) {
 	}
 }
 
+func TestGenerateImageUsesRequestedContentType(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGVsbG8="}]}`)
+	}))
+	defer server.Close()
+
+	client := openai.NewClient(option.WithAPIKey("test"), option.WithBaseURL(server.URL))
+	response, err := generateImage(context.Background(), &client, "gpt-image-1", &ai.ModelRequest{
+		Messages: []*ai.Message{ai.NewUserTextMessage("a mountain")},
+		Config: ImageGenerationConfig{
+			OutputFormat: openai.ImageGenerateParamsOutputFormatWebP,
+			Style:        openai.ImageGenerateParamsStyleVivid,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requestBody["output_format"]; got != "webp" {
+		t.Errorf("output_format = %v, want webp", got)
+	}
+	if _, ok := requestBody["style"]; ok {
+		t.Error("GPT Image request contains DALL-E-only style")
+	}
+	part := response.Message.Content[0]
+	if got := part.ContentType; got != "image/webp" {
+		t.Errorf("content type = %q, want image/webp", got)
+	}
+	if got := part.Text; got != "data:image/webp;base64,aGVsbG8=" {
+		t.Errorf("media URL = %q, want WebP data URI", got)
+	}
+}
+
 func TestGenerateImageRejectsStreaming(t *testing.T) {
 	_, err := generateImage(
 		context.Background(),

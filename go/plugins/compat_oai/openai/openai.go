@@ -205,8 +205,9 @@ func imageConfigSchema(name string) map[string]any {
 			"minimum": 1,
 			"maximum": 100,
 		}
-		properties["output_format"] = stringEnumSchema("png", "jpeg", "web")
+		properties["output_format"] = stringEnumSchema("png", "jpeg", "webp")
 		properties["quality"] = stringEnumSchema("low", "medium", "high")
+		delete(properties, "style")
 	} else {
 		properties["size"] = stringEnumSchema("1024x1024", "1792x1024", "1024x1792")
 		properties["quality"] = stringEnumSchema("standard", "hd")

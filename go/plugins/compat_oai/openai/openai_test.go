@@ -113,11 +113,13 @@ func TestImageConfigSchemasMatchModelCapabilities(t *testing.T) {
 		assertIntegerSchema(t, properties, "n", 1, 10, 1)
 		assertEnumSchema(t, properties, "size", "1024x1024", "1536x1024", "1024x1536", "auto")
 		assertEnumSchema(t, properties, "quality", "low", "medium", "high")
-		assertEnumSchema(t, properties, "style", "vivid", "natural")
 		assertEnumSchema(t, properties, "background", "transparent", "opaque", "auto")
 		assertEnumSchema(t, properties, "moderation", "low", "auto")
 		assertIntegerSchema(t, properties, "output_compression", 1, 100, nil)
-		assertEnumSchema(t, properties, "output_format", "png", "jpeg", "web")
+		assertEnumSchema(t, properties, "output_format", "png", "jpeg", "webp")
+		if properties["style"] != nil {
+			t.Error("GPT Image config schema includes DALL-E-only style")
+		}
 		if properties["response_format"] != nil {
 			t.Error("GPT Image config schema includes unsupported response_format")
 		}
