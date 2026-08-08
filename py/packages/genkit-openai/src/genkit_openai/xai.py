@@ -76,7 +76,7 @@ class XAIConfig(OpenAIConfig):
     """Configuration for xAI chat-completion models."""
 
     deferred: bool | None = None
-    reasoning_effort: Literal['low', 'medium', 'high'] | None = Field(
+    reasoning_effort: Literal['low', 'medium', 'high'] | None = Field(  # pyrefly: ignore[bad-override]
         default=None,
         validation_alias='reasoningEffort',
         serialization_alias='reasoning_effort',
