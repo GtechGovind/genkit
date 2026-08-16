@@ -18,248 +18,464 @@ package openai
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"strings"
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core/api"
 	"github.com/firebase/genkit/go/genkit"
-	"github.com/firebase/genkit/go/plugins/compat_oai"
 	openaiGo "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/shared"
 )
 
-func TestInitIncludesImageModels(t *testing.T) {
-	plugin := &OpenAI{APIKey: "test"}
-	actions := plugin.Init(context.Background())
-
-	for _, name := range []string{"openai/dall-e-3", "openai/gpt-image-1"} {
-		var found api.Action
-		for _, action := range actions {
-			if action.Name() == name {
-				found = action
-				break
-			}
-		}
-		if found == nil {
-			t.Errorf("Init() did not register %q", name)
-			continue
-		}
-		modelMetadata, ok := found.Desc().Metadata["model"].(map[string]any)
-		if !ok {
-			t.Errorf("%s metadata has no model entry", name)
-			continue
-		}
-		supports, ok := modelMetadata["supports"].(map[string]any)
-		if !ok {
-			t.Errorf("%s metadata has no supports entry", name)
-			continue
-		}
-		output, ok := supports["output"].([]string)
-		if !ok || len(output) != 1 || output[0] != "media" {
-			t.Errorf("%s supports.output = %#v, want [media]", name, supports["output"])
-		}
-	}
-}
-
-func TestImageModelRef(t *testing.T) {
-	config := &compat_oai.ImageGenerationConfig{Quality: openaiGo.ImageGenerateParamsQualityHD}
-	ref := ImageModelRef("dall-e-3", config)
-	if got := ref.Name(); got != "openai/dall-e-3" {
-		t.Errorf("Name() = %q, want %q", got, "openai/dall-e-3")
-	}
-	if got := ref.Config(); got != config {
-		t.Errorf("Config() = %#v, want the supplied config", got)
-	}
-}
-
-func TestImageConfigSchemasMatchModelCapabilities(t *testing.T) {
-	t.Run("DALL-E 3", func(t *testing.T) {
-		opts := supportedImageModels[openaiGo.ImageModelDallE3]
-		if !slices.Equal(opts.Versions, []string{"dall-e-3"}) {
-			t.Errorf("Versions = %#v, want [dall-e-3]", opts.Versions)
-		}
-		if got := opts.ConfigSchema["additionalProperties"]; got != false {
-			t.Errorf("additionalProperties = %v, want false", got)
-		}
-		properties := opts.ConfigSchema["properties"].(map[string]any)
-		assertIntegerSchema(t, properties, "n", 1, 1, 1)
-		assertEnumSchema(t, properties, "size", "1024x1024", "1792x1024", "1024x1792")
-		assertEnumSchema(t, properties, "quality", "standard", "hd")
-		assertEnumSchema(t, properties, "style", "vivid", "natural")
-		assertEnumSchema(t, properties, "response_format", "b64_json", "url")
-		responseFormat := properties["response_format"].(map[string]any)
-		if got := responseFormat["default"]; got != "b64_json" {
-			t.Errorf("response_format.default = %v, want b64_json", got)
-		}
-		for _, unsupported := range []string{"background", "moderation", "output_compression", "output_format"} {
-			if properties[unsupported] != nil {
-				t.Errorf("DALL-E config schema includes GPT Image-only %s", unsupported)
-			}
-		}
-	})
-
-	t.Run("DALL-E 2", func(t *testing.T) {
-		properties := imageConfigSchema(openaiGo.ImageModelDallE2)["properties"].(map[string]any)
-		assertIntegerSchema(t, properties, "n", 1, 10, 1)
-		assertEnumSchema(t, properties, "size", "256x256", "512x512", "1024x1024")
-		assertEnumSchema(t, properties, "quality", "standard")
-		if properties["style"] != nil {
-			t.Error("DALL-E 2 config schema includes unsupported style")
-		}
-	})
-
-	t.Run("GPT Image 1", func(t *testing.T) {
-		opts := supportedImageModels[openaiGo.ImageModelGPTImage1]
-		if !slices.Equal(opts.Versions, []string{"gpt-image-1"}) {
-			t.Errorf("Versions = %#v, want [gpt-image-1]", opts.Versions)
-		}
-		if got := opts.ConfigSchema["additionalProperties"]; got != false {
-			t.Errorf("additionalProperties = %v, want false", got)
-		}
-		properties := opts.ConfigSchema["properties"].(map[string]any)
-		assertIntegerSchema(t, properties, "n", 1, 10, 1)
-		assertEnumSchema(t, properties, "size", "1024x1024", "1536x1024", "1024x1536", "auto")
-		assertEnumSchema(t, properties, "quality", "low", "medium", "high")
-		assertEnumSchema(t, properties, "background", "transparent", "opaque", "auto")
-		assertEnumSchema(t, properties, "moderation", "low", "auto")
-		assertIntegerSchema(t, properties, "output_compression", 1, 100, nil)
-		assertEnumSchema(t, properties, "output_format", "png", "jpeg", "webp")
-		if properties["style"] != nil {
-			t.Error("GPT Image config schema includes DALL-E-only style")
-		}
-		if properties["response_format"] != nil {
-			t.Error("GPT Image config schema includes unsupported response_format")
-		}
-	})
-}
-
-func assertEnumSchema(t *testing.T, properties map[string]any, name string, want ...string) {
+func initPlugin(t *testing.T) (*OpenAI, *genkit.Genkit) {
 	t.Helper()
-	property, ok := properties[name].(map[string]any)
-	if !ok {
-		t.Fatalf("%s schema = %#v, want an object", name, properties[name])
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	o := &OpenAI{}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(o))
+	return o, g
+}
+
+// TestInitAdvertisesSDKConfigSchema pins that the models the plugin registers
+// advertise the OpenAI SDK's own config schema, which the framework validates
+// every request against.
+func TestInitAdvertisesSDKConfigSchema(t *testing.T) {
+	_, g := initPlugin(t)
+
+	m := genkit.LookupModel(g, "openai/gpt-4o")
+	if m == nil {
+		t.Fatal("gpt-4o not registered by Init")
 	}
-	got, ok := property["enum"].([]string)
-	if !ok || !slices.Equal(got, want) {
-		t.Errorf("%s.enum = %#v, want %#v", name, property["enum"], want)
+	model, ok := m.(*ai.ModelAction).Desc().Metadata["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("model metadata missing")
+	}
+	if got := model["label"]; got != "OpenAI GPT-4o" {
+		t.Errorf("label = %v, want %q", got, "OpenAI GPT-4o")
+	}
+	schema, ok := model["customOptions"].(map[string]any)
+	if !ok {
+		t.Fatalf("customOptions missing, got %v", model["customOptions"])
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok || props["max_tokens"] == nil || props["temperature"] == nil {
+		t.Errorf("config schema is not the OpenAI chat completion params schema, got %v", schema)
 	}
 }
 
-func assertIntegerSchema(t *testing.T, properties map[string]any, name string, minimum, maximum int, defaultValue any) {
-	t.Helper()
-	property, ok := properties[name].(map[string]any)
+// TestUncuratedModelDefaults covers the fallback path: a model the plugin
+// does not curate is described with the generic multimodal defaults and a
+// label derived from its name. Nothing has to register it first, which is what
+// retired the old ordering problem: Init registers every curated model, so a
+// registration call could never describe one of those.
+func TestUncuratedModelDefaults(t *testing.T) {
+	o, _ := initPlugin(t)
+
+	m := o.ResolveAction(api.ActionTypeModel, "brand-new-model")
+	if m == nil {
+		t.Fatal("ResolveAction(brand-new-model) = nil")
+	}
+	model, ok := m.Desc().Metadata["model"].(map[string]any)
 	if !ok {
-		t.Fatalf("%s schema = %#v, want an object", name, properties[name])
+		t.Fatalf("model metadata missing")
 	}
-	if got := property["type"]; got != "integer" {
-		t.Errorf("%s.type = %v, want integer", name, got)
+	if want := "openai - brand-new-model"; model["label"] != want {
+		t.Errorf("label = %v, want %q", model["label"], want)
 	}
-	if got := property["minimum"]; got != minimum {
-		t.Errorf("%s.minimum = %v, want %d", name, got, minimum)
+	supports, ok := model["supports"].(map[string]any)
+	if !ok {
+		t.Fatalf("supports metadata missing")
 	}
-	if got := property["maximum"]; got != maximum {
-		t.Errorf("%s.maximum = %v, want %d", name, got, maximum)
-	}
-	if got := property["default"]; got != defaultValue {
-		t.Errorf("%s.default = %v, want %v", name, got, defaultValue)
+	if supports["tools"] != true || supports["media"] != true {
+		t.Errorf("supports = %v, want the generic multimodal defaults", supports)
 	}
 }
 
-func TestListActionsClassifiesImageModels(t *testing.T) {
+// TestPrefixedNamesAreEquivalent pins that a [OpenAI.Models] key is taken
+// either bare or provider-prefixed. The ID reaching ResolveAction is always
+// bare, since the registry splits the provider off the action key before
+// calling the plugin, so the key is the form an application controls.
+func TestPrefixedNamesAreEquivalent(t *testing.T) {
+	for _, key := range []string{"custom-model", "openai/custom-model"} {
+		t.Setenv("OPENAI_API_KEY", "test-key")
+		o := &OpenAI{Models: map[string]ai.ModelOptions{key: {Label: "Custom"}}}
+		g := genkit.Init(context.Background(), genkit.WithPlugins(o))
+
+		m := genkit.LookupModel(g, "openai/custom-model")
+		if m == nil {
+			t.Fatalf("Models key %q: custom-model did not resolve", key)
+		}
+		if got := m.(*ai.ModelAction).Desc().Metadata["model"].(map[string]any)["label"]; got != "Custom" {
+			t.Errorf("Models key %q: label = %v, want the override's", key, got)
+		}
+	}
+}
+
+// TestModelRef pins the name a ref carries and that the typed SDK config
+// rides along, since the ref is how an application supplies config at the
+// call site.
+func TestModelRef(t *testing.T) {
+	cfg := &openaiGo.ChatCompletionNewParams{Temperature: openaiGo.Float(0.7)}
+
+	for _, name := range []string{"gpt-4o", "openai/gpt-4o"} {
+		ref := ModelRef(name, cfg)
+		if want := "openai/gpt-4o"; ref.Name() != want {
+			t.Errorf("ModelRef(%q).Name() = %q, want %q", name, ref.Name(), want)
+		}
+		if ref.Config() != cfg {
+			t.Errorf("ModelRef(%q).Config() = %v, want the config it was built with", name, ref.Config())
+		}
+	}
+
+	if got := ModelRef("gpt-4o", nil).Config(); got != (*openaiGo.ChatCompletionNewParams)(nil) {
+		t.Errorf("Config() = %v for a nil config, want a typed nil", got)
+	}
+}
+
+// TestNewEmbedderRef pins the embedder ref contract and that the registered
+// embedders advertise the typed embedding config's camelCase schema.
+func TestNewEmbedderRef(t *testing.T) {
+	_, g := initPlugin(t)
+
+	cfg := &TextEmbeddingConfig{Dimensions: 256}
+	for _, name := range []string{"text-embedding-3-small", "openai/text-embedding-3-small"} {
+		ref := NewEmbedderRef(name, cfg)
+		if want := "openai/text-embedding-3-small"; ref.Name() != want {
+			t.Errorf("NewEmbedderRef(%q).Name() = %q, want %q", name, ref.Name(), want)
+		}
+		if ref.Config() != cfg {
+			t.Errorf("NewEmbedderRef(%q).Config() = %v, want the config it was built with", name, ref.Config())
+		}
+	}
+
+	e := genkit.LookupEmbedder(g, "openai/text-embedding-3-small")
+	if e == nil {
+		t.Fatal("embedder not registered by Init")
+	}
+	embedder, ok := e.(*ai.EmbedderAction).Desc().Metadata["embedder"].(map[string]any)
+	if !ok {
+		t.Fatalf("embedder metadata missing")
+	}
+	schema, ok := embedder["customOptions"].(map[string]any)
+	if !ok {
+		t.Fatalf("customOptions missing, got %v", embedder["customOptions"])
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok || props["dimensions"] == nil || props["encodingFormat"] == nil {
+		t.Errorf("embedder config schema is not the embedding config schema, got %v", schema)
+	}
+}
+
+// TestDefineEmbedderNilOptions pins the nil EmbedderOptions path on the
+// released builder: it returns an embedder rather than failing.
+func TestDefineEmbedderNilOptions(t *testing.T) {
+	o, _ := initPlugin(t)
+
+	if e := o.DefineEmbedder("openai/custom-embedding", nil); e == nil {
+		t.Fatal("DefineEmbedder(nil opts) = nil, want the built embedder")
+	}
+}
+
+// TestEmbedderPerRequestAPIKey pins the embedder credential override: an
+// ref whose config carries an APIKey authenticates that request with
+// the override while the config's other fields reach the request body, and
+// the key stays out of the body.
+func TestEmbedderPerRequestAPIKey(t *testing.T) {
+	var auth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" {
-			t.Errorf("request path = %q, want %q", r.URL.Path, "/models")
+		auth = r.Header.Get("Authorization")
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
 		}
+		if strings.Contains(string(body), "override-key") || strings.Contains(string(body), "apiKey") {
+			t.Errorf("request body leaks the API key: %s", body)
+		}
+		if !strings.Contains(string(body), `"dimensions":256`) {
+			t.Errorf("request body is missing the config's dimensions: %s", body)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"object":"list","data":[{"id":"dall-e-3","object":"model","created":1,"owned_by":"openai"}],"has_more":false}`)
+		_, _ = io.WriteString(w, `{
+			"object":"list","model":"text-embedding-3-small",
+			"data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],
+			"usage":{"prompt_tokens":1,"total_tokens":1}
+		}`)
 	}))
 	defer server.Close()
 
-	plugin := &OpenAI{
-		APIKey: "test",
-		Opts:   []option.RequestOption{option.WithBaseURL(server.URL)},
-	}
-	plugin.Init(context.Background())
-	descriptions := plugin.ListActions(context.Background())
-	if len(descriptions) != 1 {
-		t.Fatalf("len(ListActions()) = %d, want 1", len(descriptions))
-	}
-	description := descriptions[0]
-	if description.Name != "openai/dall-e-3" {
-		t.Errorf("Name = %q, want %q", description.Name, "openai/dall-e-3")
-	}
-	properties, ok := description.InputSchema["properties"].(map[string]any)
-	if !ok || properties["config"] == nil {
-		t.Errorf("image action input schema has no config: %#v", description.InputSchema)
-	}
-}
+	t.Setenv("OPENAI_API_KEY", "plugin-key")
+	o := &OpenAI{Opts: []option.RequestOption{option.WithBaseURL(server.URL)}}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(o))
 
-func TestResolveActionClassifiesImageModels(t *testing.T) {
-	plugin := &OpenAI{APIKey: "test"}
-	plugin.Init(context.Background())
-	action := plugin.ResolveAction(api.ActionTypeModel, "gpt-image-custom")
-	if action == nil {
-		t.Fatal("ResolveAction() returned nil")
-	}
-	modelMetadata := action.Desc().Metadata["model"].(map[string]any)
-	supports := modelMetadata["supports"].(map[string]any)
-	if supports["media"] != false {
-		t.Errorf("supports.media = %v, want false", supports["media"])
-	}
-	if output := supports["output"].([]string); len(output) != 1 || output[0] != "media" {
-		t.Errorf("supports.output = %#v, want [media]", output)
-	}
-
-	model, ok := action.(ai.Model)
-	if !ok {
-		t.Errorf("resolved action type = %T, want ai.Model", action)
-		return
-	}
-	if got := model.Name(); got != "openai/gpt-image-custom" {
-		t.Errorf("Name() = %q, want %q", got, "openai/gpt-image-custom")
-	}
-}
-
-func TestImageModelGeneratesThroughGenkit(t *testing.T) {
-	var requestBody map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/images/generations" {
-			t.Errorf("request path = %q, want /images/generations", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-			t.Fatal(err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGVsbG8="}]}`)
-	}))
-	defer server.Close()
-
-	plugin := &OpenAI{
-		APIKey: "test",
-		Opts:   []option.RequestOption{option.WithBaseURL(server.URL)},
-	}
-	g := genkit.Init(context.Background(), genkit.WithPlugins(plugin), genkit.WithDefaultModel("openai/dall-e-3"))
-	resp, err := genkit.Generate(
-		context.Background(),
-		g,
-		ai.WithPrompt("a mountain"),
-		ai.WithConfig(map[string]any{"quality": "hd"}),
+	resp, err := genkit.Embed(context.Background(), g,
+		ai.WithEmbedder(NewEmbedderRef("text-embedding-3-small", &TextEmbeddingConfig{
+			APIKey:     "override-key",
+			Dimensions: 256,
+		})),
+		ai.WithTextDocs("hello"),
 	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Embed() error = %v", err)
 	}
-	if got := requestBody["model"]; got != "dall-e-3" {
-		t.Errorf("model = %v, want dall-e-3", got)
+	if len(resp.Embeddings) != 1 {
+		t.Fatalf("embeddings = %d, want 1", len(resp.Embeddings))
 	}
-	if got := requestBody["quality"]; got != "hd" {
-		t.Errorf("quality = %v, want hd", got)
+	if auth != "Bearer override-key" {
+		t.Fatalf("Authorization = %q, want the request-scoped key", auth)
 	}
-	if len(resp.Message.Content) != 1 || !resp.Message.Content[0].IsMedia() {
-		t.Fatalf("response content = %#v, want one media part", resp.Message.Content)
+}
+
+// TestEmbedderBase64EncodingFormat pins that the base64 encoding the config
+// advertises actually works: the API returns the vector as a base64 string of
+// little-endian float32s, which the plugin decodes.
+func TestEmbedderBase64EncodingFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"encoding_format":"base64"`) {
+			t.Errorf("request body is missing the base64 encoding format: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// base64 of little-endian float32s 1.0, 2.0.
+		_, _ = io.WriteString(w, `{
+			"object":"list","model":"text-embedding-3-small",
+			"data":[{"object":"embedding","index":0,"embedding":"AACAPwAAAEA="}],
+			"usage":{"prompt_tokens":1,"total_tokens":1}
+		}`)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	o := &OpenAI{Opts: []option.RequestOption{option.WithBaseURL(server.URL)}}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(o))
+
+	resp, err := genkit.Embed(context.Background(), g,
+		ai.WithEmbedder(NewEmbedderRef("text-embedding-3-small", &TextEmbeddingConfig{
+			EncodingFormat: openaiGo.EmbeddingNewParamsEncodingFormatBase64,
+		})),
+		ai.WithTextDocs("hello"),
+	)
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if len(resp.Embeddings) != 1 {
+		t.Fatalf("embeddings = %d, want 1", len(resp.Embeddings))
+	}
+	got := resp.Embeddings[0].Embedding
+	if len(got) != 2 || got[0] != 1.0 || got[1] != 2.0 {
+		t.Fatalf("embedding = %v, want [1 2] decoded from base64", got)
+	}
+}
+
+// TestDeprecatedBuildersDoNotRegister pins the released entry points this
+// plugin keeps: they build a model or embedder and hand it back without
+// touching the registry, so the capabilities they carry never reach a request.
+// [OpenAI.Models] and [OpenAI.Embedders] are what describe one.
+func TestDeprecatedBuildersDoNotRegister(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	o := &OpenAI{}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(o))
+
+	const model = "gpt-legacy-define"
+	if m := o.DefineModel(model, ai.ModelOptions{Label: "Legacy"}); m == nil {
+		t.Fatal("DefineModel() = nil, want the built model")
+	}
+	if genkit.LookupAction(g, "/model/openai/"+model) != nil {
+		t.Errorf("%q was registered by DefineModel(), want the deprecated builder to leave the registry alone", model)
+	}
+
+	const embedder = "text-embedding-legacy-define"
+	if e := o.DefineEmbedder(embedder, &ai.EmbedderOptions{Label: "Legacy"}); e == nil {
+		t.Fatal("DefineEmbedder() = nil, want the built embedder")
+	}
+	if genkit.LookupAction(g, "/embedder/openai/"+embedder) != nil {
+		t.Errorf("%q was registered by DefineEmbedder(), want the deprecated builder to leave the registry alone", embedder)
+	}
+}
+
+// TestSupportedModelCatalog guards the hand-maintained model tables against the
+// mistakes hand-maintaining them invites: a snapshot pasted under the wrong
+// model, an alias that does not match its key, a missing capability set. It
+// cannot tell whether the catalog still matches OpenAI's, only that what is
+// written here is internally consistent.
+func TestSupportedModelCatalog(t *testing.T) {
+	seen := map[string]string{}
+	for name, opts := range supportedModels {
+		if opts.Label == "" {
+			t.Errorf("%s has no label, so the Dev UI would list it blank", name)
+		}
+		if opts.Supports == nil {
+			t.Errorf("%s declares no capabilities, so generation cannot check them", name)
+		}
+		if len(opts.Versions) == 0 {
+			t.Errorf("%s lists no versions", name)
+			continue
+		}
+		if got := opts.Versions[0]; got != name {
+			t.Errorf("%s lists %q first, want the bare model ID before its snapshots", name, got)
+		}
+		for _, v := range opts.Versions {
+			if !strings.HasPrefix(v, name) {
+				t.Errorf("%s lists version %q, which is not a snapshot of it", name, v)
+			}
+			if other, dup := seen[v]; dup {
+				t.Errorf("version %q is listed under both %s and %s", v, other, name)
+			}
+			seen[v] = name
+		}
+	}
+
+	for name, opts := range supportedEmbeddingModels {
+		if opts.Label == "" {
+			t.Errorf("%s has no label", name)
+		}
+		if opts.Dimensions == 0 {
+			t.Errorf("%s declares no dimensions", name)
+		}
+	}
+}
+
+// TestConstrainedSupport pins which models advertise native structured output.
+// OpenAI gates response_format json_schema on the gpt-4o-mini and
+// gpt-4o-2024-08-06 snapshots and later, so the three models predating it must
+// stay unset: claiming support there would drop the schema instructions Genkit
+// injects into the prompt and leave nothing enforcing the schema.
+func TestConstrainedSupport(t *testing.T) {
+	// Models OpenAI released before Structured Outputs.
+	legacy := map[string]bool{"gpt-4-turbo": true, "gpt-4": true, "gpt-3.5-turbo": true}
+
+	for id, opts := range supportedModels {
+		got := opts.Supports.Constrained
+		want := ai.ConstrainedSupportAll
+		if legacy[id] {
+			want = ""
+		}
+		if got != want {
+			t.Errorf("%s constrained = %q, want %q", id, got, want)
+		}
+	}
+
+	for id := range legacy {
+		if _, ok := supportedModels[id]; !ok {
+			t.Errorf("%s is no longer in the catalog; drop it from this test", id)
+		}
+	}
+
+	if got := dynamicModelOptions.Supports.Constrained; got != ai.ConstrainedSupportAll {
+		t.Errorf("dynamic constrained = %q, want %q", got, ai.ConstrainedSupportAll)
+	}
+}
+
+// TestManagedConfigFieldsRejected pins that the SDK config cannot carry the
+// request fields Genkit builds. The schema the model advertises is the one the
+// framework validates against, so naming one of them fails the request instead
+// of being dropped on the way to the provider, which is what used to happen:
+// a tool set here and nowhere else reached the model, and the model could
+// answer with a call Genkit has no handler for.
+func TestManagedConfigFieldsRejected(t *testing.T) {
+	_, g := initPlugin(t)
+
+	_, err := genkit.Generate(context.Background(), g,
+		ai.WithModel(ModelRef("gpt-4o", &openaiGo.ChatCompletionNewParams{
+			Tools: []openaiGo.ChatCompletionToolParam{{
+				Function: shared.FunctionDefinitionParam{Name: "smuggled_tool"},
+			}},
+		})),
+		ai.WithPrompt("hello"),
+	)
+	if err == nil {
+		t.Fatal("Generate() error = nil, want the config rejected for naming a Genkit-managed field")
+	}
+	if !strings.Contains(err.Error(), "ai.WithTools()") {
+		t.Errorf("error = %v, want the rejection to name the Genkit option to use", err)
+	}
+
+	// The rest of the SDK config is untouched by the pruning.
+	if _, err := genkit.Generate(context.Background(), g,
+		ai.WithModel(ModelRef("gpt-4o", &openaiGo.ChatCompletionNewParams{
+			Temperature: openaiGo.Float(0.5),
+		})),
+		ai.WithPrompt("hello"),
+	); err != nil && strings.Contains(err.Error(), "did not match expected schema") {
+		t.Errorf("a plain config was rejected: %v", err)
+	}
+}
+
+// TestInvalidConfigTypeRejected pins the boundary rejection for a config the
+// SDK schema cannot describe at all: the request fails validation before any
+// plugin code runs or anything is sent.
+func TestInvalidConfigTypeRejected(t *testing.T) {
+	_, g := initPlugin(t)
+
+	_, err := genkit.Generate(context.Background(), g,
+		ai.WithModelName("openai/gpt-4o-mini"),
+		ai.WithPrompt("hello"),
+		ai.WithConfig("not a config"),
+	)
+	if err == nil {
+		t.Fatal("Generate() error = nil, want the boundary schema rejection")
+	}
+	if !strings.Contains(err.Error(), "did not match expected schema") {
+		t.Errorf("error = %v, want the boundary schema rejection", err)
+	}
+}
+
+// TestModelsOverride pins that a caller's entry reaches a curated model and an
+// uncurated one alike, through every path that describes a model. It is the
+// only way to describe a curated model differently: Init has already
+// registered gpt-4o by the time an application could call anything.
+func TestModelsOverride(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	o := &OpenAI{
+		Models: map[string]ai.ModelOptions{
+			// A curated model, described differently.
+			"gpt-4o": {Supports: &ai.ModelSupports{Multiturn: true, Media: false}},
+			// One the plugin does not curate, keyed provider-prefixed.
+			"openai/proxy-model": {Label: "Proxy", Supports: &ai.ModelSupports{Multiturn: true}},
+		},
+		Embedders: map[string]ai.EmbedderOptions{
+			"text-embedding-3-small": {Dimensions: 64},
+		},
+	}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(o))
+
+	// Registered by Init, and carrying the override.
+	model := genkit.LookupModel(g, "openai/gpt-4o").(*ai.ModelAction).Desc().
+		Metadata["model"].(map[string]any)
+	if supports := model["supports"].(map[string]any); supports["media"] != false {
+		t.Errorf("gpt-4o media = %v, want the override's false", supports["media"])
+	}
+	// Overlaid, not replaced: the entry says nothing about the label or the
+	// versions, so the curated ones stay.
+	if got := model["label"]; got != "OpenAI GPT-4o" {
+		t.Errorf("gpt-4o label = %v, want the curated label kept", got)
+	}
+	if versions, _ := model["versions"].([]string); len(versions) == 0 {
+		t.Error("gpt-4o versions were dropped, want the curated list kept")
+	}
+
+	// Resolved on demand, and carrying the override.
+	resolved := o.ResolveAction(api.ActionTypeModel, "proxy-model")
+	if resolved == nil {
+		t.Fatal("ResolveAction(proxy-model) = nil")
+	}
+	if got := resolved.Desc().Metadata["model"].(map[string]any)["label"]; got != "Proxy" {
+		t.Errorf("proxy-model label = %v, want the override's", got)
+	}
+
+	// Embedders take the same treatment.
+	embedder := genkit.LookupEmbedder(g, "openai/text-embedding-3-small")
+	if embedder == nil {
+		t.Fatal("text-embedding-3-small not registered by Init")
+	}
+	info := embedder.(*ai.EmbedderAction).Desc().Metadata["info"].(map[string]any)
+	if got := info["dimensions"]; got != 64 {
+		t.Errorf("dimensions = %v (%T), want the override's 64", got, got)
 	}
 }

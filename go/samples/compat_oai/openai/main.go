@@ -1,19 +1,37 @@
-// Copyright 2024 Google LLC
-// SPDX-License-Identifier: Apache-2.0
-
-// This program can be manually tested like so:
-// Start the server listening on port 3100:
+// Copyright 2026 Google LLC
 //
-//	genkit start -o -- go run .
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+// This sample demonstrates the OpenAI plugin: a flow that generates a joke
+// with a model pinned through oai.ModelRef and the OpenAI SDK's own request
+// type as its config.
+//
+// To run:
+//
+//	export OPENAI_API_KEY=...
+//	go run .
+//
+// In another terminal:
+//
+//	curl -X POST http://localhost:8080/jokesFlow \
+//	  -H "Content-Type: application/json" \
+//	  -d '{"data": "bananas"}'
 package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
@@ -25,54 +43,23 @@ import (
 func main() {
 	ctx := context.Background()
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		log.Fatalf("no OPENAI_API_KEY environment variable set")
-	}
-	openAIPlugin := &oai.OpenAI{
-		APIKey: apiKey,
-	}
-	g := genkit.Init(ctx, genkit.WithPlugins(openAIPlugin))
+	// The plugin reads the API key from the OPENAI_API_KEY environment variable.
+	g := genkit.Init(ctx, genkit.WithPlugins(&oai.OpenAI{}))
 
-	genkit.DefineFlow(g, "basic", func(ctx context.Context, subject string) (string, error) {
-		gpt4o := openAIPlugin.Model(g, "gpt-4o")
-
-		prompt := fmt.Sprintf("tell me a joke about %s", subject)
-		config := &openai.ChatCompletionNewParams{Temperature: openai.Float(0.5), MaxTokens: openai.Int(100)}
-		resp, err := genkit.Generate(ctx, g, ai.WithModel(gpt4o), ai.WithPrompt(prompt), ai.WithConfig(config))
-		if err != nil {
-			return "", err
+	// Define a flow that generates a joke about a given topic. The OpenAI
+	// plugin takes the SDK's own request type as its config.
+	genkit.DefineFlow(g, "jokesFlow", func(ctx context.Context, topic string) (string, error) {
+		if topic == "" {
+			topic = "airplane food"
 		}
-		return fmt.Sprintf("resp: %s", resp.Text()), nil
-	})
 
-	genkit.DefineFlow(g, "defined-model", func(ctx context.Context, subject string) (string, error) {
-		gpt4oMini := openAIPlugin.Model(g, "gpt-4o-mini")
-		prompt := fmt.Sprintf("tell me a joke about %s", subject)
-		config := &openai.ChatCompletionNewParams{Temperature: openai.Float(0.5)}
-		resp, err := genkit.Generate(ctx, g, ai.WithModel(gpt4oMini), ai.WithPrompt(prompt), ai.WithConfig(config))
-		if err != nil {
-			return "", err
-		}
-		return resp.Text(), nil
-	})
-
-	genkit.DefineFlow(g, "media", func(ctx context.Context, subject string) (string, error) {
-		gpt4oMini := openAIPlugin.Model(g, "gpt-4o-mini")
-		config := &openai.ChatCompletionNewParams{Temperature: openai.Float(0.5)}
-		resp, err := genkit.Generate(ctx, g,
-			ai.WithModel(gpt4oMini),
-			ai.WithConfig(config),
-			ai.WithMessages(
-				ai.NewUserMessage(ai.NewTextPart("Hi, I'll provide you a quick request in the following message")),
-				ai.NewUserMessage(
-					ai.NewTextPart("can you tell me which animal is in the provided image?"),
-					ai.NewMediaPart("image/jpg", "https://pd.w.org/2025/07/58268765f177911d4.13750400-2048x1365.jpg"),
-				)))
-		if err != nil {
-			return "", err
-		}
-		return resp.Text(), nil
+		return genkit.GenerateText(ctx, g,
+			ai.WithModel(oai.ModelRef("gpt-5.4", &openai.ChatCompletionNewParams{
+				Temperature:         openai.Float(0.2),
+				MaxCompletionTokens: openai.Int(1024),
+			})),
+			ai.WithPrompt("Share a joke about %s.", topic),
+		)
 	})
 
 	genkit.DefineFlow(g, "image-generation", func(ctx context.Context, prompt string) ([]string, error) {
@@ -86,7 +73,6 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-
 		images := make([]string, 0, len(resp.Message.Content))
 		for _, part := range resp.Message.Content {
 			if part.IsMedia() {
@@ -96,6 +82,7 @@ func main() {
 		return images, nil
 	})
 
+	// Optionally, start a web server to make the flow callable via HTTP.
 	mux := http.NewServeMux()
 	for _, a := range genkit.ListFlows(g) {
 		mux.HandleFunc("POST /"+a.Name(), genkit.Handler(a))
