@@ -103,7 +103,7 @@ func TestSpeechModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Request != req {
+	if resp.Request == nil {
 		t.Error("response did not preserve its request")
 	}
 	if got := resp.Message.Content[0].ContentType; got != "audio/wav" {

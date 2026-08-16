@@ -31,6 +31,7 @@ import (
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/core/api"
+	"github.com/firebase/genkit/go/core/status"
 	"github.com/firebase/genkit/go/core/tracing"
 	"github.com/firebase/genkit/go/internal/registry"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -1009,7 +1010,7 @@ func defineLastGoodTestAgent(reg api.Registry, name string, opts ...AgentOption[
 						s.Counter = 999
 						return s
 					})
-					return nil, core.NewError(core.UNAVAILABLE, "model timeout")
+					return nil, status.Errorf(status.ErrUnavailable, "model timeout")
 				}
 				sess.AddMessages(ai.NewModelTextMessage("echo: " + text))
 				sess.UpdateCustom(func(s testState) testState {
@@ -1651,7 +1652,7 @@ func setupPromptTestRegistry(t *testing.T) *registry.Registry {
 	ctx := context.Background()
 
 	ai.ConfigureFormats(reg)
-	ai.DefineModel(reg, "test/echo", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
+	defineTestModel(reg, "test/echo", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			// Echo back the last user message text.
 			var text string
@@ -1701,7 +1702,7 @@ func TestPromptAgent_NamedPromptSharedAcrossAgents(t *testing.T) {
 
 	var mu sync.Mutex
 	var renderedSystems []string
-	ai.DefineModel(reg, "test/capture", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
+	defineTestModel(reg, "test/capture", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			mu.Lock()
 			for _, m := range req.Messages {
@@ -1765,7 +1766,7 @@ func TestDefinePromptAgent_DefaultAndNamed(t *testing.T) {
 
 	var mu sync.Mutex
 	var renderedSystems []string
-	ai.DefineModel(reg, "test/capture", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
+	defineTestModel(reg, "test/capture", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			mu.Lock()
 			for _, m := range req.Messages {
@@ -1908,7 +1909,7 @@ func TestPromptAgent_MultiTurnHistory(t *testing.T) {
 	reg := setupPromptTestRegistry(t)
 
 	// Use a model that echoes all message count so we can verify history grows.
-	ai.DefineModel(reg, "test/history", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
+	defineTestModel(reg, "test/history", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			// Count total messages received (includes prompt-rendered + history).
 			var parts []string
@@ -2055,14 +2056,14 @@ func TestPromptAgent_ToolLoopMessages(t *testing.T) {
 	ai.ConfigureFormats(reg)
 
 	// Define two tools so the model can call them across multiple rounds.
-	ai.DefineTool(reg, "greet", "returns a greeting",
+	defineTestTool(reg, "greet", "returns a greeting",
 		func(ctx *ai.ToolContext, input struct {
 			Name string `json:"name"`
 		}) (string, error) {
 			return "hello " + input.Name, nil
 		},
 	)
-	ai.DefineTool(reg, "farewell", "returns a farewell",
+	defineTestTool(reg, "farewell", "returns a farewell",
 		func(ctx *ai.ToolContext, input struct {
 			Name string `json:"name"`
 		}) (string, error) {
@@ -2074,7 +2075,7 @@ func TestPromptAgent_ToolLoopMessages(t *testing.T) {
 	//   Round 1: request "greet" tool
 	//   Round 2: after seeing greet response, request "farewell" tool
 	//   Round 3: after seeing farewell response, return final text
-	ai.DefineModel(reg, "test/toolmodel", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true, Tools: true}},
+	defineTestModel(reg, "test/toolmodel", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true, Tools: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			// Count tool responses to determine which round we're in.
 			toolResps := 0
@@ -2362,7 +2363,7 @@ func TestPromptAgent_RejectsInvalidInputMessage(t *testing.T) {
 	ctx := context.Background()
 	reg := setupPromptTestRegistry(t)
 	var modelCalls atomic.Int64
-	ai.DefineModel(reg, "test/reject", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true}},
+	defineTestModel(reg, "test/reject", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			modelCalls.Add(1)
 			return &ai.ModelResponse{Message: ai.NewModelTextMessage("unexpected")}, nil
@@ -2655,7 +2656,7 @@ func TestPromptAgent_RejectsResumeForUnrequestedTool(t *testing.T) {
 	ai.ConfigureFormats(reg)
 
 	var modelCalls atomic.Int32
-	ai.DefineModel(reg, "test/plain", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, Tools: true}},
+	defineTestModel(reg, "test/plain", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, Tools: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			modelCalls.Add(1)
 			return &ai.ModelResponse{Request: req, Message: ai.NewModelTextMessage("hello")}, nil
@@ -5048,7 +5049,7 @@ func TestAgent_StateTransform_ErrorFailsClientManagedOutputClosed(t *testing.T) 
 	reg := newTestRegistry(t)
 
 	transform := func(_ context.Context, s *SessionState[testState]) (*SessionState[testState], error) {
-		return nil, core.NewError(core.PERMISSION_DENIED, "cannot shape state")
+		return nil, status.Errorf(status.ErrPermissionDenied, "cannot shape state")
 	}
 
 	af := DefineCustomAgent(reg, "clientXformErr",
@@ -5071,6 +5072,9 @@ func TestAgent_StateTransform_ErrorFailsClientManagedOutputClosed(t *testing.T) 
 	if out.Error == nil || out.Error.Status != core.PERMISSION_DENIED {
 		t.Errorf("Error = %+v, want status %q from the transform", out.Error, core.PERMISSION_DENIED)
 	}
+	if !errors.Is(out.Error, status.ErrPermissionDenied) {
+		t.Errorf("Error = %+v, want it to match status.ErrPermissionDenied", out.Error)
+	}
 	// failedOutput shapes the last-good state through the same transform, which
 	// errors again here; the runtime omits state rather than leaking it.
 	if out.State != nil {
@@ -5088,7 +5092,7 @@ func TestAgent_StateTransform_ErrorFailsSnapshotReadClosed(t *testing.T) {
 	store := newTestInMemStore[testState]()
 
 	transform := func(_ context.Context, s *SessionState[testState]) (*SessionState[testState], error) {
-		return nil, core.NewError(core.PERMISSION_DENIED, "cannot shape state")
+		return nil, status.Errorf(status.ErrPermissionDenied, "cannot shape state")
 	}
 
 	af := DefineCustomAgent(reg, "snapXformErr",
@@ -5704,7 +5708,7 @@ func TestPromptAgent_ForwardsFinishReason(t *testing.T) {
 	ctx := context.Background()
 	reg := registry.New()
 	ai.ConfigureFormats(reg)
-	ai.DefineModel(reg, "test/length", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
+	defineTestModel(reg, "test/length", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, SystemRole: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			return &ai.ModelResponse{
 				Request:      req,
@@ -6096,14 +6100,14 @@ func TestPromptAgent_ForwardsInterruptedFinishReason(t *testing.T) {
 	reg := registry.New()
 	ai.ConfigureFormats(reg)
 
-	interruptTool := ai.DefineTool(reg, "interruptor", "always interrupts",
+	interruptTool := defineTestTool(reg, "interruptor", "always interrupts",
 		func(tc *ai.ToolContext, input any) (any, error) {
 			return nil, tc.Interrupt(&ai.InterruptOptions{
 				Metadata: map[string]any{"reason": "needs approval"},
 			})
 		},
 	)
-	ai.DefineModel(reg, "test/interrupt", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, Tools: true}},
+	defineTestModel(reg, "test/interrupt", &ai.ModelOptions{Supports: &ai.ModelSupports{Multiturn: true, Tools: true}},
 		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
 			return &ai.ModelResponse{
 				Request: req,
@@ -7100,10 +7104,13 @@ func TestPromptAgent_InlineMessages_DoesNotMutateSharedMetadata(t *testing.T) {
 	if _, ok := shared.Metadata[promptMessageKey]; ok {
 		t.Errorf("prompt message tag leaked into shared config message metadata: %v", shared.Metadata)
 	}
-	// The base message must still be filtered out of session history:
-	// 1 user message + 1 model reply = 2.
-	if got := len(response.State.Messages); got != 2 {
-		t.Errorf("expected 2 messages, got %d", got)
+	// The base message must still be filtered out of session history. This
+	// prompt declares its own conversation, so it owns the placement and
+	// never places the session's messages: what comes back is the reply
+	// alone. See TestPromptAgent_HistoryPlacement for the rule and the forms
+	// that do place it.
+	if got := len(response.State.Messages); got != 1 {
+		t.Errorf("expected 1 message, got %d", got)
 		for i, m := range response.State.Messages {
 			t.Logf("  msg[%d]: role=%s text=%s", i, m.Role, m.Text())
 		}

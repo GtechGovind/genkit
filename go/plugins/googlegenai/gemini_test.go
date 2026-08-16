@@ -17,12 +17,30 @@
 package googlegenai
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/internal/base"
 	"google.golang.org/genai"
 )
+
+// toGeminiRequestFromRaw runs the two steps a real request goes through: the
+// framework deserializes the type-erased config into the model's config type,
+// then the plugin folds the request into it. The tests below set
+// [ai.ModelRequest.Config] the way callers do, so going through both keeps
+// them honest about what the model function actually receives.
+func toGeminiRequestFromRaw(input *ai.ModelRequest, cache *genai.CachedContent, modelName ...string) (*genai.GenerateContentConfig, error) {
+	config, err := base.ConvertToExact[genai.GenerateContentConfig](input.Config)
+	if err != nil {
+		return nil, err
+	}
+	return toGeminiRequest(input, &config, cache, modelName...)
+}
 
 func TestConvertRequest(t *testing.T) {
 	text := "hello"
@@ -122,7 +140,7 @@ func TestConvertRequest(t *testing.T) {
 		},
 	}
 	t.Run("convert request", func(t *testing.T) {
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -207,7 +225,7 @@ func TestConvertRequest(t *testing.T) {
 		req := ai.ModelRequest{
 			Config: badCfg,
 		}
-		_, err := toGeminiRequest(&req, nil)
+		_, err := toGeminiRequestFromRaw(&req, nil)
 		if err != nil {
 			t.Fatalf("expected nil, got: %v", err)
 		}
@@ -270,7 +288,7 @@ func TestConvertRequest(t *testing.T) {
 				req := ai.ModelRequest{
 					Config: tc.cfg,
 				}
-				_, err := toGeminiRequest(&req, nil)
+				_, err := toGeminiRequestFromRaw(&req, nil)
 				if err == nil {
 					t.Fatalf("expected an error: '%v' but got nil", tc.err)
 				}
@@ -283,7 +301,7 @@ func TestConvertRequest(t *testing.T) {
 				"temperature": "not a number", // This should fail map->struct conversion
 			},
 		}
-		_, err := toGeminiRequest(&req, nil)
+		_, err := toGeminiRequestFromRaw(&req, nil)
 		if err == nil {
 			t.Fatal("expected error for invalid config map")
 		}
@@ -304,7 +322,7 @@ func TestConvertRequest(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil, "googleai/gemini-3.1-flash-tts-preview")
+		gcc, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-3.1-flash-tts-preview")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -331,7 +349,7 @@ func TestConvertRequest(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil, "googleai/gemini-3.1-flash-tts-preview")
+		gcc, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-3.1-flash-tts-preview")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -356,7 +374,7 @@ func TestConvertRequest(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil, "googleai/gemini-3.1-flash-tts-preview")
+		gcc, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-3.1-flash-tts-preview")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +401,7 @@ func TestConvertRequest(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil, "googleai/gemini-3.1-flash-tts-preview")
+		gcc, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-3.1-flash-tts-preview")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +441,7 @@ func TestConvertRequest(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil, "googleai/gemini-3.1-flash-tts-preview")
+		gcc, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-3.1-flash-tts-preview")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -442,7 +460,7 @@ func TestConvertRequest(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil, "googleai/gemini-2.5-flash")
+		gcc, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-2.5-flash")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -524,7 +542,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -568,7 +586,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -600,7 +618,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -640,7 +658,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -690,7 +708,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -737,7 +755,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -785,7 +803,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		if _, err := toGeminiRequest(req, nil); err == nil {
+		if _, err := toGeminiRequestFromRaw(req, nil); err == nil {
 			t.Fatal("expected error rejecting FunctionDeclarations in config tools, got nil")
 		}
 	})
@@ -811,7 +829,7 @@ func TestToolMerging(t *testing.T) {
 			},
 		}
 
-		gcc, err := toGeminiRequest(req, nil)
+		gcc, err := toGeminiRequestFromRaw(req, nil)
 		if err != nil {
 			t.Fatalf("toGeminiRequest failed: %v", err)
 		}
@@ -1435,5 +1453,344 @@ func TestToGeminiContents(t *testing.T) {
 		if contents[i].Role != want {
 			t.Errorf("contents[%d].Role = %q, want %q", i, contents[i].Role, want)
 		}
+	}
+}
+
+// TestCallerConfigNotMutated pins that folding a request into the config
+// leaves the caller's own config untouched. The framework hands the plugin a
+// shallow copy, so the two amendments that reach through it, the TTS default
+// voice and the built-in tools merge, have to clone before writing.
+func TestCallerConfigNotMutated(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tts default voice", func(t *testing.T) {
+		caller := &genai.GenerateContentConfig{
+			SpeechConfig: &genai.SpeechConfig{LanguageCode: "en-US"},
+		}
+		req := &ai.ModelRequest{
+			Config:   caller,
+			Messages: []*ai.Message{ai.NewUserMessage(ai.NewTextPart("hi"))},
+		}
+		if _, err := toGeminiRequestFromRaw(req, nil, "googleai/gemini-3.1-flash-tts-preview"); err != nil {
+			t.Fatal(err)
+		}
+		if caller.SpeechConfig.VoiceConfig != nil {
+			t.Error("the plugin's default voice was written into the caller's SpeechConfig")
+		}
+	})
+
+	t.Run("tools merge", func(t *testing.T) {
+		// Spare capacity is what an append would scribble into.
+		tools := make([]*genai.Tool, 1, 4)
+		tools[0] = &genai.Tool{GoogleSearch: &genai.GoogleSearch{}}
+		caller := &genai.GenerateContentConfig{Tools: tools}
+		req := &ai.ModelRequest{
+			Config:   caller,
+			Messages: []*ai.Message{ai.NewUserMessage(ai.NewTextPart("hi"))},
+			Tools: []*ai.ToolDefinition{{
+				Name:        "myTool",
+				Description: "this is a dummy tool",
+				InputSchema: map[string]any{"type": "object"},
+			}},
+		}
+		if _, err := toGeminiRequestFromRaw(req, nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(caller.Tools) != 1 {
+			t.Errorf("caller's Tools length = %d, want 1", len(caller.Tools))
+		}
+		if spare := tools[:cap(tools)]; spare[1] != nil {
+			t.Error("the converted tools were appended into the caller's backing array")
+		}
+	})
+
+	// A config hoisted into a package var or a ModelRef is shared by every
+	// request, so writing the tool-calling mode through it would leak one
+	// request's allowed function names into the next and race between two in
+	// flight at once.
+	t.Run("tool choice", func(t *testing.T) {
+		caller := &genai.GenerateContentConfig{
+			ToolConfig: &genai.ToolConfig{
+				RetrievalConfig: &genai.RetrievalConfig{LanguageCode: "en-US"},
+			},
+		}
+		req := &ai.ModelRequest{
+			Config:     caller,
+			Messages:   []*ai.Message{ai.NewUserMessage(ai.NewTextPart("hi"))},
+			ToolChoice: ai.ToolChoiceRequired,
+			Tools: []*ai.ToolDefinition{{
+				Name:        "myTool",
+				Description: "this is a dummy tool",
+				InputSchema: map[string]any{"type": "object"},
+			}},
+		}
+		got, err := toGeminiRequestFromRaw(req, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if caller.ToolConfig.FunctionCallingConfig != nil {
+			t.Errorf("the request's tool choice was written into the caller's ToolConfig: %+v",
+				caller.ToolConfig.FunctionCallingConfig)
+		}
+		// The clone still has to carry the caller's own settings forward.
+		if got.ToolConfig == nil || got.ToolConfig.FunctionCallingConfig == nil {
+			t.Fatalf("request ToolConfig lost the tool choice, got %+v", got.ToolConfig)
+		}
+		if got.ToolConfig.RetrievalConfig != caller.ToolConfig.RetrievalConfig {
+			t.Error("cloning the ToolConfig dropped the caller's RetrievalConfig")
+		}
+	})
+}
+
+func TestTranslateCandidateBlockedWithoutContent(t *testing.T) {
+	// Safety-blocked candidates arrive with a finish reason but no Content.
+	// They must come back as a contentless blocked response, not an error.
+	cand := &genai.Candidate{
+		FinishReason:  genai.FinishReasonSafety,
+		FinishMessage: "blocked for safety",
+	}
+	r, err := translateCandidate(cand)
+	if err != nil {
+		t.Fatalf("translateCandidate: %v", err)
+	}
+	if r.FinishReason != ai.FinishReasonBlocked {
+		t.Errorf("FinishReason = %q, want %q", r.FinishReason, ai.FinishReasonBlocked)
+	}
+	if r.FinishMessage != "blocked for safety" {
+		t.Errorf("FinishMessage = %q, want %q", r.FinishMessage, "blocked for safety")
+	}
+	if r.Message == nil {
+		t.Fatal("Message = nil, want an empty model message")
+	}
+	if len(r.Message.Content) != 0 {
+		t.Errorf("Message.Content = %v, want empty", r.Message.Content)
+	}
+	if r.Message.Role != ai.RoleModel {
+		t.Errorf("Message.Role = %q, want %q", r.Message.Role, ai.RoleModel)
+	}
+}
+
+func TestTranslateCandidateNoContentNoFinishReason(t *testing.T) {
+	// A candidate with neither content nor a finish reason is malformed.
+	if _, err := translateCandidate(&genai.Candidate{}); err == nil {
+		t.Fatal("translateCandidate = nil error, want error for malformed candidate")
+	}
+}
+
+func TestTranslateResponsePromptBlocked(t *testing.T) {
+	resp := &genai.GenerateContentResponse{
+		PromptFeedback: &genai.GenerateContentResponsePromptFeedback{
+			BlockReason: genai.BlockedReasonSafety,
+		},
+	}
+	r, err := translateResponse(resp)
+	if err != nil {
+		t.Fatalf("translateResponse: %v", err)
+	}
+	if r.FinishReason != ai.FinishReasonBlocked {
+		t.Errorf("FinishReason = %q, want %q", r.FinishReason, ai.FinishReasonBlocked)
+	}
+	if r.FinishMessage == "" {
+		t.Error("FinishMessage is empty, want a block explanation")
+	}
+	if r.Message == nil {
+		t.Fatal("Message = nil, want an empty model message")
+	}
+	if _, ok := r.Custom.(map[string]any)["promptFeedback"]; !ok {
+		t.Error("Custom[promptFeedback] missing")
+	}
+}
+
+func TestTranslateResponsePromptBlockedMessagePreferred(t *testing.T) {
+	resp := &genai.GenerateContentResponse{
+		PromptFeedback: &genai.GenerateContentResponsePromptFeedback{
+			BlockReason:        genai.BlockedReasonBlocklist,
+			BlockReasonMessage: "term is on a blocklist",
+		},
+	}
+	r, err := translateResponse(resp)
+	if err != nil {
+		t.Fatalf("translateResponse: %v", err)
+	}
+	if r.FinishMessage != "term is on a blocklist" {
+		t.Errorf("FinishMessage = %q, want the service-provided message", r.FinishMessage)
+	}
+}
+
+func TestTranslateResponseNoCandidates(t *testing.T) {
+	if _, err := translateResponse(&genai.GenerateContentResponse{}); err == nil {
+		t.Fatal("translateResponse = nil error, want error when no candidates and no prompt feedback")
+	}
+}
+
+func TestMergeCandidateMetadata(t *testing.T) {
+	dst := &genai.Candidate{}
+
+	mergeCandidateMetadata(dst, &genai.Candidate{
+		SafetyRatings: []*genai.SafetyRating{{Category: genai.HarmCategoryHateSpeech}},
+		CitationMetadata: &genai.CitationMetadata{
+			Citations: []*genai.Citation{{URI: "https://one.example"}},
+		},
+	})
+	mergeCandidateMetadata(dst, &genai.Candidate{
+		FinishReason: genai.FinishReasonStop,
+		GroundingMetadata: &genai.GroundingMetadata{
+			WebSearchQueries: []string{"genkit"},
+		},
+		SafetyRatings: []*genai.SafetyRating{{Category: genai.HarmCategoryDangerousContent}},
+		CitationMetadata: &genai.CitationMetadata{
+			Citations: []*genai.Citation{{URI: "https://two.example"}},
+		},
+	})
+
+	if dst.FinishReason != genai.FinishReasonStop {
+		t.Errorf("FinishReason = %q, want STOP", dst.FinishReason)
+	}
+	if dst.GroundingMetadata == nil || len(dst.GroundingMetadata.WebSearchQueries) != 1 {
+		t.Errorf("GroundingMetadata = %+v, want web search queries preserved", dst.GroundingMetadata)
+	}
+	// Citations accumulate; safety ratings take the latest chunk's values.
+	if got := len(dst.CitationMetadata.Citations); got != 2 {
+		t.Errorf("Citations count = %d, want 2", got)
+	}
+	if len(dst.SafetyRatings) != 1 || dst.SafetyRatings[0].Category != genai.HarmCategoryDangerousContent {
+		t.Errorf("SafetyRatings = %+v, want only the latest ratings", dst.SafetyRatings)
+	}
+}
+
+// newTestClient returns a Gemini API genai client. A non-empty baseURL
+// points it at a fake server instead of the real API; with "" the client is
+// only good for constructing actions, never for requests.
+func newTestClient(t *testing.T, baseURL string) *genai.Client {
+	t.Helper()
+	client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
+		Backend: genai.BackendGeminiAPI,
+		APIKey:  "test-api-key",
+		HTTPOptions: genai.HTTPOptions{
+			BaseURL: baseURL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return client
+}
+
+func sseHandler(lines ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, l := range lines {
+			fmt.Fprintf(w, "data: %s\n\n", l)
+		}
+	}
+}
+
+func streamInput() *ai.ModelRequest {
+	return &ai.ModelRequest{
+		Messages: []*ai.Message{
+			{Role: ai.RoleUser, Content: []*ai.Part{ai.NewTextPart("hi")}},
+		},
+	}
+}
+
+func TestGenerateStreamPreservesCandidateMetadata(t *testing.T) {
+	srv := httptest.NewServer(sseHandler(
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"hello "}]}}]}`,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"world"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["genkit"]},"safetyRatings":[{"category":"HARM_CATEGORY_HATE_SPEECH","probability":"NEGLIGIBLE"}]}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}}`,
+	))
+	defer srv.Close()
+	client := newTestClient(t, srv.URL)
+
+	var streamed []*ai.Part
+	cb := func(ctx context.Context, c *ai.ModelResponseChunk) error {
+		streamed = append(streamed, c.Content...)
+		return nil
+	}
+	r, err := generate(context.Background(), client, "gemini-flash-latest", streamInput(), &genai.GenerateContentConfig{}, cb)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	if got := r.Text(); got != "hello world" {
+		t.Errorf("Text() = %q, want %q", got, "hello world")
+	}
+	if len(streamed) != 2 {
+		t.Errorf("streamed %d parts, want 2", len(streamed))
+	}
+	if r.FinishReason != ai.FinishReasonStop {
+		t.Errorf("FinishReason = %q, want %q", r.FinishReason, ai.FinishReasonStop)
+	}
+	if r.Usage == nil || r.Usage.TotalTokens != 3 {
+		t.Errorf("Usage = %+v, want total tokens 3", r.Usage)
+	}
+
+	cands, ok := r.Custom.(map[string]any)["candidates"].([]*genai.Candidate)
+	if !ok || len(cands) != 1 {
+		t.Fatalf("Custom[candidates] = %#v, want one candidate", r.Custom)
+	}
+	if cands[0].GroundingMetadata == nil || len(cands[0].GroundingMetadata.WebSearchQueries) != 1 {
+		t.Errorf("GroundingMetadata = %+v, want web search queries preserved across the stream", cands[0].GroundingMetadata)
+	}
+	if len(cands[0].SafetyRatings) != 1 {
+		t.Errorf("SafetyRatings = %+v, want ratings preserved across the stream", cands[0].SafetyRatings)
+	}
+}
+
+func TestGenerateStreamEmptyStream(t *testing.T) {
+	srv := httptest.NewServer(sseHandler())
+	defer srv.Close()
+	client := newTestClient(t, srv.URL)
+
+	cb := func(ctx context.Context, c *ai.ModelResponseChunk) error { return nil }
+	_, err := generate(context.Background(), client, "gemini-flash-latest", streamInput(), &genai.GenerateContentConfig{}, cb)
+	if err == nil {
+		t.Fatal("generate = nil error, want error for an empty stream")
+	}
+}
+
+func TestGenerateStreamPromptBlocked(t *testing.T) {
+	srv := httptest.NewServer(sseHandler(
+		`{"promptFeedback":{"blockReason":"SAFETY"}}`,
+	))
+	defer srv.Close()
+	client := newTestClient(t, srv.URL)
+
+	var streamed int
+	cb := func(ctx context.Context, c *ai.ModelResponseChunk) error {
+		streamed++
+		return nil
+	}
+	r, err := generate(context.Background(), client, "gemini-flash-latest", streamInput(), &genai.GenerateContentConfig{}, cb)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if r.FinishReason != ai.FinishReasonBlocked {
+		t.Errorf("FinishReason = %q, want %q", r.FinishReason, ai.FinishReasonBlocked)
+	}
+	if streamed != 0 {
+		t.Errorf("streamed %d chunks, want 0", streamed)
+	}
+}
+
+func TestGenerateStreamBlockedCandidateMidStream(t *testing.T) {
+	// A candidate that terminates on safety mid-stream has a finish reason
+	// but no content in its final chunk.
+	srv := httptest.NewServer(sseHandler(
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"so far"}]}}]}`,
+		`{"candidates":[{"finishReason":"SAFETY"}]}`,
+	))
+	defer srv.Close()
+	client := newTestClient(t, srv.URL)
+
+	cb := func(ctx context.Context, c *ai.ModelResponseChunk) error { return nil }
+	r, err := generate(context.Background(), client, "gemini-flash-latest", streamInput(), &genai.GenerateContentConfig{}, cb)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if r.FinishReason != ai.FinishReasonBlocked {
+		t.Errorf("FinishReason = %q, want %q", r.FinishReason, ai.FinishReasonBlocked)
+	}
+	if got := r.Text(); got != "so far" {
+		t.Errorf("Text() = %q, want %q", got, "so far")
 	}
 }

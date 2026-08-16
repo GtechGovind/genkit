@@ -29,6 +29,16 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
+func actionConfigSchema(t *testing.T, action api.Action) map[string]any {
+	t.Helper()
+	inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
+	config := inputProperties["config"].(map[string]any)
+	if alternatives, ok := config["anyOf"].([]any); ok {
+		return alternatives[0].(map[string]any)
+	}
+	return config
+}
+
 func TestAudioModelsRegistered(t *testing.T) {
 	plugin := &OpenAI{APIKey: "test-key"}
 	actions := plugin.Init(context.Background())
@@ -71,8 +81,7 @@ func TestGPT4oMiniTTSSchemaOmitsSpeed(t *testing.T) {
 	var schema map[string]any
 	for _, action := range actions {
 		if action.Name() == "openai/gpt-4o-mini-tts" {
-			inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
-			schema = inputProperties["config"].(map[string]any)
+			schema = actionConfigSchema(t, action)
 			break
 		}
 	}
@@ -98,8 +107,7 @@ func TestLegacyTTSSchemasOmitInstructions(t *testing.T) {
 		if action.Name() != "openai/tts-1" && action.Name() != "openai/tts-1-hd" {
 			continue
 		}
-		inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
-		schema := inputProperties["config"].(map[string]any)
+		schema := actionConfigSchema(t, action)
 		properties := schema["properties"].(map[string]any)
 		if properties["instructions"] != nil {
 			t.Errorf("%s schema unexpectedly includes instructions", action.Name())
@@ -155,8 +163,7 @@ func TestGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
 			if action == nil {
 				t.Fatalf("model %q was not registered", name)
 			}
-			inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
-			schema := inputProperties["config"].(map[string]any)
+			schema := actionConfigSchema(t, action)
 			properties := schema["properties"].(map[string]any)
 			responseFormat := properties["response_format"].(map[string]any)
 			if got := responseFormat["default"]; got != "json" {
@@ -181,8 +188,7 @@ func TestVersionedGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
 	if action == nil {
 		t.Fatal("ResolveAction() = nil")
 	}
-	inputProperties := action.Desc().InputSchema["properties"].(map[string]any)
-	config := inputProperties["config"].(map[string]any)
+	config := actionConfigSchema(t, action)
 	properties := config["properties"].(map[string]any)
 	responseFormat := properties["response_format"].(map[string]any)
 	if got := responseFormat["enum"]; !slices.Equal(got.([]any), []any{"json"}) {
@@ -191,7 +197,18 @@ func TestVersionedGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
 }
 
 func TestWhisperSchemaIncludesTranslate(t *testing.T) {
-	schema := supportedWhisperModels["whisper-1"].ConfigSchema
+	plugin := &OpenAI{APIKey: "test-key"}
+	actions := plugin.Init(context.Background())
+	var schema map[string]any
+	for _, action := range actions {
+		if action.Name() == "openai/whisper-1" {
+			schema = actionConfigSchema(t, action)
+			break
+		}
+	}
+	if schema == nil {
+		t.Fatal("whisper-1 was not registered")
+	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("schema properties = %#v, want map", schema["properties"])
@@ -200,8 +217,8 @@ func TestWhisperSchemaIncludesTranslate(t *testing.T) {
 	if !ok {
 		t.Fatalf("translate schema = %#v, want map", properties["translate"])
 	}
-	if got := translate["type"]; got != "boolean" {
-		t.Errorf("translate type = %v, want boolean", got)
+	if got := translate["type"]; got != "boolean" && !slices.Equal(got.([]any), []any{"boolean", "null"}) {
+		t.Errorf("translate type = %v, want boolean or nullable boolean", got)
 	}
 	if got := translate["default"]; got != false {
 		t.Errorf("translate default = %v, want false", got)
@@ -338,6 +355,9 @@ func TestListActionsClassifiesAudioModels(t *testing.T) {
 		config, ok := properties["config"].(map[string]any)
 		if !ok {
 			t.Fatalf("%s config schema = %#v, want map", action.Name, properties["config"])
+		}
+		if alternatives, ok := config["anyOf"].([]any); ok {
+			config = alternatives[0].(map[string]any)
 		}
 		configProperties := config["properties"].(map[string]any)
 		if action.Name == "openai/future-tts" && configProperties["voice"] == nil {

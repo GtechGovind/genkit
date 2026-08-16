@@ -335,10 +335,77 @@ func wrapReflectionHandler(h func(w http.ResponseWriter, r *http.Request) error)
 		w.Header().Set("x-genkit-version", "go/"+internal.Version)
 
 		if err = h(w, r); err != nil {
-			errorResponse := core.ToReflectionError(err)
+			errorResponse := toReflectionError(err)
 			w.WriteHeader(errorResponse.Code)
 			writeJSON(ctx, w, errorResponse)
 		}
+	}
+}
+
+// reflectionErrorDetails is the details field of a [reflectionError].
+type reflectionErrorDetails struct {
+	Stack   *string `json:"stack,omitempty"`
+	TraceID *string `json:"traceId,omitempty"`
+}
+
+// reflectionError is the wire format for an error in a reflection API
+// response. It belongs to this boundary alone: the reflection API is how the
+// dev UI talks to a running app, so nothing outside this package constructs or
+// reads one.
+type reflectionError struct {
+	Details *reflectionErrorDetails `json:"details,omitempty"`
+	Message string                  `json:"message"`
+	Code    int                     `json:"code"`
+}
+
+// setTraceID records traceID, allocating the details envelope when the error
+// arrived without one.
+//
+// [toReflectionError] fills in details only from a stack or trace the error
+// itself carried, and leaves the pointer nil otherwise. Every error that was
+// never classified reaches that case, which is any plain error returned by a
+// plugin or a user's own function, so the envelope cannot be assumed to exist
+// just because a trace ID is on hand to write into it.
+func (re *reflectionError) setTraceID(traceID string) {
+	if traceID == "" {
+		return
+	}
+	if re.Details == nil {
+		re.Details = &reflectionErrorDetails{}
+	}
+	re.Details.TraceID = &traceID
+}
+
+// toReflectionError renders err as the reflection API's wire envelope, mapping
+// its status to an HTTP code and carrying the stack through to the dev UI.
+func toReflectionError(err error) reflectionError {
+	e := status.Convert(err)
+	if e == nil {
+		return reflectionError{Code: status.Internal.HTTPCode(), Details: &reflectionErrorDetails{}}
+	}
+	// The deprecated core constructors recorded the stack under
+	// Details["stack"]; status.Errorf keeps it off the details map and formats
+	// it on demand. Read both so errors from either carry a stack.
+	stack, stackOK := e.Details["stack"].(string)
+	if !stackOK {
+		stack = e.Stack()
+		stackOK = stack != ""
+	}
+	traceID, traceOK := e.Details["traceId"].(string)
+	var details *reflectionErrorDetails
+	if stackOK || traceOK {
+		details = &reflectionErrorDetails{}
+		if stackOK {
+			details.Stack = &stack
+		}
+		if traceOK {
+			details.TraceID = &traceID
+		}
+	}
+	return reflectionError{
+		Details: details,
+		Code:    e.Status.HTTPCode(),
+		Message: e.Message,
 	}
 }
 
@@ -450,10 +517,10 @@ func handleRunAction(g *Genkit, activeActions *activeActionsMap) func(w http.Res
 					traceIDPtr = &resp.Telemetry.TraceID
 				}
 				errResp := errorResponse{
-					Error: core.ReflectionError{
+					Error: reflectionError{
 						Code:    core.CodeCancelled, // gRPC CANCELLED = 1
 						Message: "Action was cancelled",
-						Details: &core.ReflectionErrorDetails{
+						Details: &reflectionErrorDetails{
 							TraceID: traceIDPtr,
 						},
 					},
@@ -474,9 +541,9 @@ func handleRunAction(g *Genkit, activeActions *activeActionsMap) func(w http.Res
 
 			// Handle other errors
 			if stream {
-				refErr := core.ToReflectionError(err)
-				if resp != nil && resp.Telemetry.TraceID != "" {
-					refErr.Details.TraceID = &resp.Telemetry.TraceID
+				refErr := toReflectionError(err)
+				if resp != nil {
+					refErr.setTraceID(resp.Telemetry.TraceID)
 				}
 
 				reflectErr, err := json.Marshal(refErr)
@@ -492,9 +559,9 @@ func handleRunAction(g *Genkit, activeActions *activeActionsMap) func(w http.Res
 			}
 
 			// Non-streaming error
-			errorResponse := core.ToReflectionError(err)
-			if resp != nil && resp.Telemetry.TraceID != "" {
-				errorResponse.Details.TraceID = &resp.Telemetry.TraceID
+			errorResponse := toReflectionError(err)
+			if resp != nil {
+				errorResponse.setTraceID(resp.Telemetry.TraceID)
 			}
 
 			reflectErr, err := json.Marshal(errorResponse)
@@ -719,7 +786,7 @@ type telemetry struct {
 }
 
 type errorResponse struct {
-	Error core.ReflectionError `json:"error"`
+	Error reflectionError `json:"error"`
 }
 
 func runAction(ctx context.Context, g *Genkit, key string, input, init json.RawMessage, telemetryLabels json.RawMessage, cb streamingCallback[json.RawMessage], runtimeContext map[string]any) (*runActionResponse, error) {
