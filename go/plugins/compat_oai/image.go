@@ -30,7 +30,6 @@ import (
 // ImageGenerationConfig contains the OpenAI-compatible image generation
 // options that may be supplied through a Genkit model request.
 type ImageGenerationConfig struct {
-	Version           string                                   `json:"version,omitempty"`
 	Background        openai.ImageGenerateParamsBackground     `json:"background,omitempty"`
 	Moderation        openai.ImageGenerateParamsModeration     `json:"moderation,omitempty"`
 	N                 int64                                    `json:"n,omitempty"`
@@ -107,9 +106,6 @@ func imageGenerateParams(modelName string, input *ai.ModelRequest) (openai.Image
 }
 
 func applyImageGenerationConfig(params *openai.ImageGenerateParams, config ImageGenerationConfig) {
-	if config.Version != "" {
-		params.Model = config.Version
-	}
 	params.Background = config.Background
 	params.Moderation = config.Moderation
 	params.OutputFormat = config.OutputFormat
@@ -134,11 +130,23 @@ func imageResponse(
 	format openai.ImageGenerateParamsOutputFormat,
 ) *ai.ModelResponse {
 	contentType := imageContentType(format)
+	raw := *result
+	raw.Data = append([]openai.Image(nil), result.Data...)
+	for i := range raw.Data {
+		raw.Data[i].B64JSON = ""
+	}
 	response := &ai.ModelResponse{
 		FinishReason: ai.FinishReasonStop,
 		Message:      &ai.Message{Role: ai.RoleModel},
-		Raw:          result,
+		Raw:          &raw,
 		Request:      input,
+	}
+	if result.JSON.Usage.Valid() {
+		response.Usage = &ai.GenerationUsage{
+			InputTokens:  int(result.Usage.InputTokens),
+			OutputTokens: int(result.Usage.OutputTokens),
+			TotalTokens:  int(result.Usage.TotalTokens),
+		}
 	}
 	for _, image := range result.Data {
 		url := image.URL

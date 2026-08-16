@@ -18,6 +18,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core/api"
+	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/compat_oai"
 	openaiGo "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -85,7 +87,7 @@ func TestImageConfigSchemasMatchModelCapabilities(t *testing.T) {
 			t.Errorf("additionalProperties = %v, want false", got)
 		}
 		properties := opts.ConfigSchema["properties"].(map[string]any)
-		assertIntegerSchema(t, properties, "n", 1, 10, 1)
+		assertIntegerSchema(t, properties, "n", 1, 1, 1)
 		assertEnumSchema(t, properties, "size", "1024x1024", "1792x1024", "1024x1792")
 		assertEnumSchema(t, properties, "quality", "standard", "hd")
 		assertEnumSchema(t, properties, "style", "vivid", "natural")
@@ -98,6 +100,16 @@ func TestImageConfigSchemasMatchModelCapabilities(t *testing.T) {
 			if properties[unsupported] != nil {
 				t.Errorf("DALL-E config schema includes GPT Image-only %s", unsupported)
 			}
+		}
+	})
+
+	t.Run("DALL-E 2", func(t *testing.T) {
+		properties := imageConfigSchema(openaiGo.ImageModelDallE2)["properties"].(map[string]any)
+		assertIntegerSchema(t, properties, "n", 1, 10, 1)
+		assertEnumSchema(t, properties, "size", "256x256", "512x512", "1024x1024")
+		assertEnumSchema(t, properties, "quality", "standard")
+		if properties["style"] != nil {
+			t.Error("DALL-E 2 config schema includes unsupported style")
 		}
 	})
 
@@ -210,5 +222,44 @@ func TestResolveActionClassifiesImageModels(t *testing.T) {
 	}
 	if got := model.Name(); got != "openai/gpt-image-custom" {
 		t.Errorf("Name() = %q, want %q", got, "openai/gpt-image-custom")
+	}
+}
+
+func TestImageModelGeneratesThroughGenkit(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/images/generations" {
+			t.Errorf("request path = %q, want /images/generations", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGVsbG8="}]}`)
+	}))
+	defer server.Close()
+
+	plugin := &OpenAI{
+		APIKey: "test",
+		Opts:   []option.RequestOption{option.WithBaseURL(server.URL)},
+	}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(plugin), genkit.WithDefaultModel("openai/dall-e-3"))
+	resp, err := genkit.Generate(
+		context.Background(),
+		g,
+		ai.WithPrompt("a mountain"),
+		ai.WithConfig(map[string]any{"quality": "hd"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requestBody["model"]; got != "dall-e-3" {
+		t.Errorf("model = %v, want dall-e-3", got)
+	}
+	if got := requestBody["quality"]; got != "hd" {
+		t.Errorf("quality = %v, want hd", got)
+	}
+	if len(resp.Message.Content) != 1 || !resp.Message.Content[0].IsMedia() {
+		t.Fatalf("response content = %#v, want one media part", resp.Message.Content)
 	}
 }

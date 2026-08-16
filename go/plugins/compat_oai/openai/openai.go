@@ -190,11 +190,7 @@ func imageConfigSchema(name string) map[string]any {
 			"maximum": 10,
 			"default": 1,
 		},
-		"style": stringEnumSchema("vivid", "natural"),
-		"user":  map[string]any{"type": "string"},
-		"version": map[string]any{
-			"type": "string",
-		},
+		"user": map[string]any{"type": "string"},
 	}
 	if strings.Contains(name, "gpt-image") {
 		properties["size"] = stringEnumSchema("1024x1024", "1536x1024", "1024x1536", "auto")
@@ -207,10 +203,23 @@ func imageConfigSchema(name string) map[string]any {
 		}
 		properties["output_format"] = stringEnumSchema("png", "jpeg", "webp")
 		properties["quality"] = stringEnumSchema("low", "medium", "high")
-		delete(properties, "style")
-	} else {
+	} else if name == openaiGo.ImageModelDallE3 {
+		properties["n"].(map[string]any)["maximum"] = 1
 		properties["size"] = stringEnumSchema("1024x1024", "1792x1024", "1024x1792")
 		properties["quality"] = stringEnumSchema("standard", "hd")
+		properties["style"] = stringEnumSchema("vivid", "natural")
+		properties["response_format"] = stringEnumSchema("b64_json", "url")
+		properties["response_format"].(map[string]any)["default"] = "b64_json"
+	} else if name == openaiGo.ImageModelDallE2 {
+		properties["size"] = stringEnumSchema("256x256", "512x512", "1024x1024")
+		properties["quality"] = stringEnumSchema("standard")
+		properties["response_format"] = stringEnumSchema("b64_json", "url")
+		properties["response_format"].(map[string]any)["default"] = "b64_json"
+	} else {
+		// Future DALL-E-compatible models are discovered dynamically. Keep their
+		// provider-defined values open while still filtering unsupported fields.
+		properties["size"] = map[string]any{"type": "string"}
+		properties["quality"] = map[string]any{"type": "string"}
 		properties["response_format"] = stringEnumSchema("b64_json", "url")
 		properties["response_format"].(map[string]any)["default"] = "b64_json"
 	}
@@ -332,15 +341,7 @@ func (o *OpenAI) ListActions(ctx context.Context) []api.ActionDesc {
 		if !isImageModel(name) {
 			continue
 		}
-		opts, ok := supportedImageModels[name]
-		if !ok {
-			opts = ai.ModelOptions{
-				Label:        "OpenAI - " + name,
-				Stage:        ai.ModelStageStable,
-				Supports:     &compat_oai.ImageGeneration,
-				ConfigSchema: imageConfigSchema(name),
-			}
-		}
+		opts := imageModelOptions(name)
 		descriptions[i] = o.DefineImageModel(name, opts).(api.Action).Desc()
 	}
 	return descriptions
@@ -348,16 +349,20 @@ func (o *OpenAI) ListActions(ctx context.Context) []api.ActionDesc {
 
 func (o *OpenAI) ResolveAction(atype api.ActionType, name string) api.Action {
 	if atype == api.ActionTypeModel && isImageModel(name) {
-		opts, ok := supportedImageModels[name]
-		if !ok {
-			opts = ai.ModelOptions{
-				Label:        "OpenAI - " + name,
-				Stage:        ai.ModelStageStable,
-				Supports:     &compat_oai.ImageGeneration,
-				ConfigSchema: imageConfigSchema(name),
-			}
-		}
+		opts := imageModelOptions(name)
 		return o.DefineImageModel(name, opts).(api.Action)
 	}
 	return o.openAICompatible.ResolveAction(atype, name)
+}
+
+func imageModelOptions(name string) ai.ModelOptions {
+	if opts, ok := supportedImageModels[name]; ok {
+		return opts
+	}
+	return ai.ModelOptions{
+		Label:        "OpenAI - " + name,
+		Stage:        ai.ModelStageStable,
+		Supports:     &compat_oai.ImageGeneration,
+		ConfigSchema: imageConfigSchema(name),
+	}
 }

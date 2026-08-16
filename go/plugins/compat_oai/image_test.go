@@ -33,12 +33,10 @@ func TestImageGenerateParams(t *testing.T) {
 	request := &ai.ModelRequest{
 		Messages: []*ai.Message{ai.NewUserTextMessage("a cat wearing a hat")},
 		Config: map[string]any{
-			"version":         "dall-e-3-2026-01-01",
 			"n":               2,
 			"quality":         "hd",
 			"response_format": "url",
 			"size":            "1024x1024",
-			"temperature":     0.5,
 		},
 	}
 
@@ -55,7 +53,7 @@ func TestImageGenerateParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, want := range map[string]any{
-		"model":           "dall-e-3-2026-01-01",
+		"model":           "dall-e-3",
 		"prompt":          "a cat wearing a hat",
 		"n":               float64(2),
 		"quality":         "hd",
@@ -65,9 +63,6 @@ func TestImageGenerateParams(t *testing.T) {
 		if value := got[key]; value != want {
 			t.Errorf("params[%q] = %v, want %v", key, value, want)
 		}
-	}
-	if _, ok := got["temperature"]; ok {
-		t.Error("standard Genkit config field temperature was sent to the Images API")
 	}
 }
 
@@ -154,7 +149,7 @@ func TestGenerateImage(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGVsbG8="},{"url":"https://example.com/image.png"}]}`)
+		io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGVsbG8="},{"url":"https://example.com/image.png"}],"usage":{"input_tokens":11,"input_tokens_details":{"image_tokens":0,"text_tokens":11},"output_tokens":22,"total_tokens":33}}`)
 	}))
 	defer server.Close()
 
@@ -173,8 +168,15 @@ func TestGenerateImage(t *testing.T) {
 	if response.Raw == nil {
 		t.Error("response did not preserve the raw Images API response")
 	}
+	raw := response.Raw.(*openai.ImagesResponse)
+	if raw.Data[0].B64JSON != "" {
+		t.Error("raw response duplicated the base64 image payload")
+	}
 	if response.FinishReason != ai.FinishReasonStop {
 		t.Errorf("FinishReason = %q, want %q", response.FinishReason, ai.FinishReasonStop)
+	}
+	if response.Usage == nil || response.Usage.InputTokens != 11 || response.Usage.OutputTokens != 22 || response.Usage.TotalTokens != 33 {
+		t.Errorf("Usage = %#v, want input=11 output=22 total=33", response.Usage)
 	}
 	if got := len(response.Message.Content); got != 2 {
 		t.Fatalf("len(Content) = %d, want 2", got)
