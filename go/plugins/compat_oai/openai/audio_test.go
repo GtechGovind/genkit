@@ -167,8 +167,8 @@ func TestGPTTranscriptionSchemaRequiresJSONResponse(t *testing.T) {
 			}
 			metadata := action.Desc().Metadata["model"].(map[string]any)
 			supports := metadata["supports"].(map[string]any)
-			if got := supports["output"]; !slices.Equal(got.([]string), []string{"json"}) {
-				t.Errorf("output support = %#v, want [json]", got)
+			if got := supports["output"]; !slices.Equal(got.([]string), []string{"text"}) {
+				t.Errorf("output support = %#v, want [text]", got)
 			}
 		})
 	}
@@ -208,7 +208,7 @@ func TestWhisperSchemaIncludesTranslate(t *testing.T) {
 	}
 }
 
-func TestWhisperSupportsTextAndJSON(t *testing.T) {
+func TestWhisperSupportsText(t *testing.T) {
 	plugin := &OpenAI{APIKey: "test-key"}
 	actions := plugin.Init(context.Background())
 	for _, action := range actions {
@@ -217,8 +217,8 @@ func TestWhisperSupportsTextAndJSON(t *testing.T) {
 		}
 		metadata := action.Desc().Metadata["model"].(map[string]any)
 		supports := metadata["supports"].(map[string]any)
-		if got := supports["output"]; !slices.Equal(got.([]string), []string{"text", "json"}) {
-			t.Errorf("output support = %#v, want [text json]", got)
+		if got := supports["output"]; !slices.Equal(got.([]string), []string{"text"}) {
+			t.Errorf("output support = %#v, want [text]", got)
 		}
 		return
 	}
@@ -328,8 +328,8 @@ func TestListActionsClassifiesAudioModels(t *testing.T) {
 		if action.Name == "openai/future-transcribe" && (output[0] != "text" || supports["media"] != true) {
 			t.Errorf("transcription supports = %#v, want media input and text output", supports)
 		}
-		if action.Name == "openai/gpt-4o-transcribe-2026-01-01" && !slices.Equal(output, []string{"json"}) {
-			t.Errorf("GPT transcription output = %#v, want [json]", output)
+		if action.Name == "openai/gpt-4o-transcribe-2026-01-01" && !slices.Equal(output, []string{"text"}) {
+			t.Errorf("GPT transcription output = %#v, want [text]", output)
 		}
 		properties, ok := action.InputSchema["properties"].(map[string]any)
 		if !ok {

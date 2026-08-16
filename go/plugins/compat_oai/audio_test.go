@@ -28,9 +28,25 @@ import (
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/core"
+	"github.com/firebase/genkit/go/core/api"
+	"github.com/firebase/genkit/go/genkit"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 )
+
+type audioTestPlugin struct {
+	compatible *OpenAICompatible
+	modelID    string
+}
+
+func (p *audioTestPlugin) Name() string { return "test" }
+
+func (p *audioTestPlugin) Init(ctx context.Context) []api.Action {
+	p.compatible.Init(ctx)
+	model := p.compatible.DefineTranscriptionModel("test", p.modelID, ai.ModelOptions{})
+	return []api.Action{model.(api.Action)}
+}
 
 func newAudioPlugin(t *testing.T, handler http.HandlerFunc) *OpenAICompatible {
 	t.Helper()
@@ -288,8 +304,42 @@ func TestTranscriptionModelJSONResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := resp.Text(); got != "Hello JSON" {
-		t.Errorf("response text = %q, want Hello JSON", got)
+	if got := resp.Text(); got != `{"text":"Hello JSON","language":"en"}` {
+		t.Errorf("response text = %q, want the JSON response", got)
+	}
+}
+
+func TestTranscriptionModelJSONResponseThroughGenkit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":"Hello JSON"}`)
+	}))
+	defer server.Close()
+
+	plugin := &audioTestPlugin{
+		compatible: &OpenAICompatible{
+			Provider: "test",
+			Opts: []option.RequestOption{
+				option.WithAPIKey("test-key"),
+				option.WithBaseURL(server.URL),
+			},
+		},
+		modelID: "gpt-4o-transcribe",
+	}
+	g := genkit.Init(context.Background(), genkit.WithPlugins(plugin), genkit.WithDefaultModel("test/gpt-4o-transcribe"))
+	resp, err := genkit.Generate(
+		context.Background(),
+		g,
+		ai.WithMessages(ai.NewUserMessage(
+			ai.NewMediaPart("audio/wav", "data:audio/wav;base64,YXVkaW8="),
+		)),
+		ai.WithOutputFormat("json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(resp.Text())) {
+		t.Errorf("response text = %q, want valid JSON", resp.Text())
 	}
 }
 
@@ -505,6 +555,32 @@ func TestToChunkingStrategyPreservesTypedValue(t *testing.T) {
 	}
 	if got.OfAudioTranscriptionNewsChunkingStrategyVadConfig != vad {
 		t.Error("toChunkingStrategy copied an already typed strategy")
+	}
+}
+
+func TestToChunkingStrategyRejectsInvalidValues(t *testing.T) {
+	for _, value := range []any{
+		"garbage",
+		42,
+		TranscriptionChunkingStrategy{Type: "other"},
+		TranscriptionChunkingStrategy{Type: "server_vad", Threshold: 1.1},
+	} {
+		if _, err := toChunkingStrategy(value); err == nil {
+			t.Errorf("toChunkingStrategy(%#v) succeeded, want error", value)
+		}
+	}
+}
+
+func TestTranscriptionSchemasValidateChunkingStrategy(t *testing.T) {
+	for name, schema := range map[string]map[string]any{
+		"transcription": transcriptionConfigSchema("gpt-4o-transcribe"),
+		"whisper":       withChunkingStrategySchema(core.InferSchemaMap(WhisperConfig{})),
+	} {
+		properties := schema["properties"].(map[string]any)
+		chunking := properties["chunking_strategy"].(map[string]any)
+		if got := len(chunking["oneOf"].([]any)); got != 2 {
+			t.Errorf("%s chunking_strategy oneOf length = %d, want 2", name, got)
+		}
 	}
 }
 

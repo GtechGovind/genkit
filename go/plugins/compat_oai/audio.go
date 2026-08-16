@@ -44,12 +44,12 @@ var (
 	// TranscriptionSupports describes speech-to-text model capabilities.
 	TranscriptionSupports = ai.ModelSupports{
 		Media:  true,
-		Output: []string{"text", "json"},
+		Output: []string{"text"},
 	}
 
 	gptTranscriptionSupports = ai.ModelSupports{
 		Media:  true,
-		Output: []string{"json"},
+		Output: []string{"text"},
 	}
 )
 
@@ -178,8 +178,11 @@ func (o *OpenAICompatible) DefineSpeechModel(provider, id string, opts ai.ModelO
 		return &ai.ModelResponse{
 			Message:      ai.NewModelMessage(ai.NewMediaPart(contentType, dataURI)),
 			FinishReason: ai.FinishReasonStop,
-			Raw:          audio,
-			Request:      req,
+			Raw: map[string]any{
+				"byte_length":  len(audio),
+				"content_type": contentType,
+			},
+			Request: req,
 		}, nil
 	})
 }
@@ -234,7 +237,7 @@ func (o *OpenAICompatible) DefineWhisperModel(provider, id string, opts ai.Model
 		opts.Supports = &TranscriptionSupports
 	}
 	if opts.ConfigSchema == nil {
-		opts.ConfigSchema = core.InferSchemaMap(WhisperConfig{})
+		opts.ConfigSchema = withChunkingStrategySchema(core.InferSchemaMap(WhisperConfig{}))
 	}
 	if opts.Versions == nil {
 		opts.Versions = []string{id}
@@ -386,6 +389,31 @@ func toChunkingStrategy(value any) (openai.AudioTranscriptionNewParamsChunkingSt
 			return result, nil
 		}
 		return *value, nil
+	case string:
+		if value != "auto" {
+			return result, fmt.Errorf("must be %q or a server_vad object", "auto")
+		}
+	case TranscriptionChunkingStrategy:
+		if err := validateChunkingStrategy(value); err != nil {
+			return result, err
+		}
+	case *TranscriptionChunkingStrategy:
+		if value == nil {
+			return result, nil
+		}
+		if err := validateChunkingStrategy(*value); err != nil {
+			return result, err
+		}
+	case map[string]any:
+		strategy, err := base.MapToStruct[TranscriptionChunkingStrategy](value)
+		if err != nil {
+			return result, err
+		}
+		if err := validateChunkingStrategy(strategy); err != nil {
+			return result, err
+		}
+	default:
+		return result, fmt.Errorf("must be %q or a server_vad object, got %T", "auto", value)
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -395,6 +423,16 @@ func toChunkingStrategy(value any) (openai.AudioTranscriptionNewParamsChunkingSt
 		return result, err
 	}
 	return result, nil
+}
+
+func validateChunkingStrategy(strategy TranscriptionChunkingStrategy) error {
+	if strategy.Type != "server_vad" {
+		return fmt.Errorf("type must be %q", "server_vad")
+	}
+	if strategy.Threshold < 0 || strategy.Threshold > 1 {
+		return fmt.Errorf("threshold must be between 0 and 1")
+	}
+	return nil
 }
 
 func (o *OpenAICompatible) audioTextResponse(ctx context.Context, path string, params any, format openai.AudioResponseFormat) (string, any, error) {
@@ -420,8 +458,17 @@ func (o *OpenAICompatible) audioTextResponse(ctx context.Context, path string, p
 }
 
 func transcriptionResponse(req *ai.ModelRequest, text string, raw any) *ai.ModelResponse {
+	messageText := text
+	if req.Output != nil && req.Output.Format == "json" {
+		if data, ok := raw.(json.RawMessage); ok && json.Valid(data) {
+			messageText = string(data)
+		} else {
+			data, _ := json.Marshal(map[string]string{"text": text})
+			messageText = string(data)
+		}
+	}
 	return &ai.ModelResponse{
-		Message:      ai.NewModelTextMessage(text),
+		Message:      ai.NewModelTextMessage(messageText),
 		FinishReason: ai.FinishReasonStop,
 		Raw:          raw,
 		Request:      req,
@@ -502,13 +549,40 @@ func defaultTranscriptionResponseFormat(model string) openai.AudioResponseFormat
 }
 
 func transcriptionConfigSchema(model string) map[string]any {
-	schema := core.InferSchemaMap(TranscriptionConfig{})
+	schema := withChunkingStrategySchema(core.InferSchemaMap(TranscriptionConfig{}))
 	if !isGPTTranscriptionModel(model) {
 		return schema
 	}
 	// The pinned OpenAI SDK supports only JSON responses for GPT transcription
 	// models, which is intentionally stricter than the current canonical JS schema.
 	return jsonOnlyTranscriptionConfigSchema(schema)
+}
+
+func withChunkingStrategySchema(schema map[string]any) map[string]any {
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return schema
+	}
+	schema = maps.Clone(schema)
+	properties = maps.Clone(properties)
+	schema["properties"] = properties
+	properties["chunking_strategy"] = map[string]any{
+		"oneOf": []any{
+			map[string]any{"const": "auto"},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":                map[string]any{"const": "server_vad"},
+					"prefix_padding_ms":   map[string]any{"type": "integer"},
+					"silence_duration_ms": map[string]any{"type": "integer"},
+					"threshold":           map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+				},
+				"required":             []string{"type"},
+				"additionalProperties": false,
+			},
+		},
+	}
+	return schema
 }
 
 func jsonOnlyTranscriptionConfigSchema(schema map[string]any) map[string]any {
