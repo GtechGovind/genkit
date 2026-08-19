@@ -18,8 +18,6 @@ package anthropic
 
 import (
 	"context"
-	"errors"
-	"log/slog"
 	"os"
 	"regexp"
 	"sync"
@@ -29,6 +27,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core/api"
+	"github.com/firebase/genkit/go/core/logger"
+	"github.com/firebase/genkit/go/core/status"
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/internal"
 	ant "github.com/firebase/genkit/go/plugins/internal/anthropic"
@@ -167,7 +167,7 @@ func (a *Anthropic) Init(ctx context.Context) []api.Action {
 func (a *Anthropic) ListActions(ctx context.Context) []api.ActionDesc {
 	models, err := a.discoveredModels(ctx)
 	if err != nil {
-		slog.Error("unable to list anthropic models from Anthropic API", "error", err)
+		logger.Error(ctx, "unable to list anthropic models from Anthropic API", "error", err)
 		return nil
 	}
 
@@ -207,7 +207,7 @@ func (a *Anthropic) DefineModel(g *genkit.Genkit, id string, opts *ai.ModelOptio
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.initted {
-		return nil, errors.New("anthropic plugin not initialized")
+		return nil, status.Errorf(status.ErrFailedPrecondition, "anthropic plugin not initialized")
 	}
 
 	// Trim before resolving, so a prefixed ID still hits supportedModels.

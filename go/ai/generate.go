@@ -22,9 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
@@ -193,16 +196,8 @@ type ModelOptions struct {
 func DefineGenerateAction(ctx context.Context, r api.Registry) *generateAction {
 	a := core.NewStreamingActionOf(api.ActionTypeUtil, "generate", nil,
 		func(ctx context.Context, actionOpts *GenerateActionOptions, cb ModelStreamCallback) (resp *ModelResponse, err error) {
-			actionOptsBytes, _ := json.Marshal(actionOpts)
-			logger.FromContext(ctx).Debug("GenerateAction",
-				"input", actionOptsBytes)
-			defer func() {
-				respBytes, _ := json.Marshal(resp)
-				logger.FromContext(ctx).Debug("GenerateAction",
-					"output", respBytes,
-					"err", err)
-			}()
-
+			// The request and response are recorded on the action's trace span;
+			// no need to duplicate them here.
 			return GenerateWithRequest(ctx, r, actionOpts, nil, cb)
 		})
 	a.Register(r)
@@ -328,6 +323,7 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 	if opts.Model == "" {
 		if defaultModel, ok := r.LookupValue(api.DefaultModelKey).(string); ok && defaultModel != "" {
 			opts.Model = defaultModel
+			logger.Debug(ctx, "no model specified, using default model", "model", opts.Model)
 		}
 		if opts.Model == "" {
 			return nil, status.Errorf(status.ErrInvalidArgument, "ai.GenerateWithRequest: model is required")
@@ -363,10 +359,10 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 	}
 	var middlewareTools []Tool
 	for _, mw := range mws {
-		if mw == nil {
+		if mw.hooks == nil {
 			continue
 		}
-		for _, t := range mw.Tools {
+		for _, t := range mw.hooks.Tools {
 			if _, ok := toolDefMap[t.Name()]; ok {
 				return nil, status.Errorf(status.ErrInvalidArgument, "ai.GenerateWithRequest: tool %q is contributed by middleware but already declared elsewhere", t.Name())
 			}
@@ -449,7 +445,7 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 	var fn ModelFunc
 	if bm != nil {
 		if cb != nil {
-			logger.FromContext(ctx).Warn("background model does not support streaming", "model", bm.Name())
+			logger.Warn(ctx, "background model does not support streaming, ignoring stream callback", "model", bm.Name())
 		}
 		fn = backgroundModelToModelFn(bm.Start)
 	} else {
@@ -563,9 +559,20 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 				return generate(ctx, resumeReq, currentTurn+1, currentIndex)
 			}
 
+			logger.Debug(ctx, "calling model", "model", opts.Model, "turn", currentTurn, "messages", len(req.Messages))
 			resp, err := fn(ctx, req, wrappedCb)
 			if err != nil {
 				return nil, err
+			}
+
+			// ToolRequests allocates a scan of the message, so only build the
+			// log arguments when a handler accepts debug records.
+			if logger.FromContext(ctx).Enabled(ctx, slog.LevelDebug) {
+				modelArgs := []any{"model", opts.Model, "turn", currentTurn, "finishReason", resp.FinishReason, "toolRequests", len(resp.ToolRequests())}
+				if resp.Usage != nil {
+					modelArgs = append(modelArgs, "inputTokens", resp.Usage.InputTokens, "outputTokens", resp.Usage.OutputTokens)
+				}
+				logger.Debug(ctx, "model responded", modelArgs...)
 			}
 
 			// Ensure all tool requests have unique refs for matching during resume.
@@ -590,11 +597,15 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 					// enforced, so skipping it on an unclassified reason would
 					// silently drop validation for output the model may well
 					// have completed.
+					logger.Warn(ctx, "model finished abnormally, skipping output parsing",
+						"model", opts.Model,
+						"finishReason", resp.FinishReason,
+						"finishMessage", resp.FinishMessage)
 				default:
 					// This is legacy behavior. New format handlers should implement ParseMessage as a passthrough.
 					resp.Message, err = formatHandler.ParseMessage(resp.Message)
 					if err != nil {
-						logger.FromContext(ctx).Debug("model failed to generate output matching expected schema", "error", err.Error())
+						logger.Debug(ctx, "model output does not match the expected schema", "model", opts.Model, "error", err)
 						return nil, status.Errorf(status.ErrInvalidOutput, "model failed to generate output matching expected schema: %w", err)
 					}
 				}
@@ -613,6 +624,7 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 				return nil, err
 			}
 			if interruptMsg != nil {
+				logger.Debug(ctx, "generation paused by tool interrupts", "model", opts.Model, "turn", currentTurn)
 				resp.FinishReason = "interrupted"
 				resp.FinishMessage = "One or more tool calls resulted in interrupts."
 				resp.Message = interruptMsg
@@ -640,43 +652,116 @@ func GenerateWithRequest(ctx context.Context, r api.Registry, opts *GenerateActi
 		})
 	}
 
+	resolvedArgs := []any{
+		"model", opts.Model,
+		"messages", len(req.Messages),
+		"tools", len(toolDefs),
+		"maxTurns", maxTurns,
+		"format", outputCfg.Format,
+		"constrained", outputCfg.Constrained,
+		"streaming", cb != nil,
+	}
+	if len(mws) > 0 {
+		resolvedArgs = append(resolvedArgs, "middleware", middlewareNames(mws))
+	}
+	logger.Debug(ctx, "generate request resolved", resolvedArgs...)
+
 	return generate(ctx, req, 0, 0)
 }
 
+// middlewareNames returns the names of the resolved middleware in chain
+// order, for the request-resolved log line.
+func middlewareNames(mws []namedHooks) []string {
+	names := make([]string, len(mws))
+	for i, mw := range mws {
+		names[i] = mw.name
+	}
+	return names
+}
+
+// hookLogArgs builds the attributes for the "middleware hook finished" log
+// record: the middleware and hook names, hook-specific extras, the duration,
+// whether the hook short-circuited the chain (returned without invoking
+// next), and any error it returned. Hooks have no spans of their own, so
+// these records are the only per-hook visibility.
+func hookLogArgs(name, hook string, start time.Time, nextCalled bool, err error, extra ...any) []any {
+	args := make([]any, 0, len(extra)+10)
+	args = append(args, "middleware", name, "hook", hook)
+	args = append(args, extra...)
+	args = append(args, "duration", time.Since(start).Round(time.Millisecond))
+	if !nextCalled {
+		args = append(args, "shortCircuited", true)
+	}
+	if err != nil {
+		args = append(args, "error", err)
+	}
+	return args
+}
+
 // buildGenerateChain composes the WrapGenerate hooks from mws (outer-to-inner)
-// around run. Middleware with a nil WrapGenerate hook is skipped.
-func buildGenerateChain(mws []*Hooks, run func(ctx context.Context, params *GenerateParams) (*ModelResponse, error)) func(ctx context.Context, params *GenerateParams) (*ModelResponse, error) {
+// around run. Middleware with a nil WrapGenerate hook is skipped. When debug
+// logging is enabled, each hook invocation is bracketed by log records that
+// attribute the layer, its duration, and whether it short-circuited the chain.
+func buildGenerateChain(mws []namedHooks, run func(ctx context.Context, params *GenerateParams) (*ModelResponse, error)) func(ctx context.Context, params *GenerateParams) (*ModelResponse, error) {
 	chain := run
 	for i := len(mws) - 1; i >= 0; i-- {
 		mw := mws[i]
-		if mw == nil || mw.WrapGenerate == nil {
+		if mw.hooks == nil || mw.hooks.WrapGenerate == nil {
 			continue
 		}
-		hook := mw.WrapGenerate
+		hook := mw.hooks.WrapGenerate
+		name := mw.name
 		next := chain
 		chain = func(ctx context.Context, params *GenerateParams) (*ModelResponse, error) {
-			return hook(ctx, params, next)
+			if !logger.FromContext(ctx).Enabled(ctx, slog.LevelDebug) {
+				return hook(ctx, params, next)
+			}
+			logger.Debug(ctx, "middleware hook started", "middleware", name, "hook", "generate", "iteration", params.Iteration)
+			start := time.Now()
+			var nextCalled atomic.Bool
+			resp, err := hook(ctx, params, func(ctx context.Context, p *GenerateParams) (*ModelResponse, error) {
+				nextCalled.Store(true)
+				return next(ctx, p)
+			})
+			logger.Debug(ctx, "middleware hook finished",
+				hookLogArgs(name, "generate", start, nextCalled.Load(), err, "iteration", params.Iteration)...)
+			return resp, err
 		}
 	}
 	return chain
 }
 
 // buildModelChain composes the WrapModel hooks from mws (outer-to-inner)
-// around fn. Middleware with a nil WrapModel hook is skipped.
-func buildModelChain(mws []*Hooks, fn ModelFunc) ModelFunc {
+// around fn. Middleware with a nil WrapModel hook is skipped. Hook
+// invocations are logged as in [buildGenerateChain].
+func buildModelChain(mws []namedHooks, fn ModelFunc) ModelFunc {
 	chain := fn
 	for i := len(mws) - 1; i >= 0; i-- {
 		mw := mws[i]
-		if mw == nil || mw.WrapModel == nil {
+		if mw.hooks == nil || mw.hooks.WrapModel == nil {
 			continue
 		}
-		hook := mw.WrapModel
+		hook := mw.hooks.WrapModel
+		name := mw.name
 		next := chain
 		chain = func(ctx context.Context, req *ModelRequest, cb ModelStreamCallback) (*ModelResponse, error) {
-			return hook(ctx, &ModelParams{Request: req, Callback: cb},
+			nextFn := func(ctx context.Context, params *ModelParams) (*ModelResponse, error) {
+				return next(ctx, params.Request, params.Callback)
+			}
+			if !logger.FromContext(ctx).Enabled(ctx, slog.LevelDebug) {
+				return hook(ctx, &ModelParams{Request: req, Callback: cb}, nextFn)
+			}
+			logger.Debug(ctx, "middleware hook started", "middleware", name, "hook", "model")
+			start := time.Now()
+			var nextCalled atomic.Bool
+			resp, err := hook(ctx, &ModelParams{Request: req, Callback: cb},
 				func(ctx context.Context, params *ModelParams) (*ModelResponse, error) {
-					return next(ctx, params.Request, params.Callback)
+					nextCalled.Store(true)
+					return nextFn(ctx, params)
 				})
+			logger.Debug(ctx, "middleware hook finished",
+				hookLogArgs(name, "model", start, nextCalled.Load(), err)...)
+			return resp, err
 		}
 	}
 	return chain
@@ -695,10 +780,10 @@ var toolRanKey = base.NewContextKey[*bool]()
 // invoke from concurrent goroutines; each invocation threads its own params
 // through the shared hook chain. When no WrapTool hooks are configured, the
 // tool is invoked directly without allocating a ToolParams wrapper.
-func buildToolRunner(mws []*Hooks) func(ctx context.Context, tool Tool, req *ToolRequest) (*MultipartToolResponse, error) {
+func buildToolRunner(mws []namedHooks) func(ctx context.Context, tool Tool, req *ToolRequest) (*MultipartToolResponse, error) {
 	hasHook := false
 	for _, mw := range mws {
-		if mw != nil && mw.WrapTool != nil {
+		if mw.hooks != nil && mw.hooks.WrapTool != nil {
 			hasHook = true
 			break
 		}
@@ -716,13 +801,26 @@ func buildToolRunner(mws []*Hooks) func(ctx context.Context, tool Tool, req *Too
 	}
 	for i := len(mws) - 1; i >= 0; i-- {
 		mw := mws[i]
-		if mw == nil || mw.WrapTool == nil {
+		if mw.hooks == nil || mw.hooks.WrapTool == nil {
 			continue
 		}
-		hook := mw.WrapTool
+		hook := mw.hooks.WrapTool
+		name := mw.name
 		next := chain
 		chain = func(ctx context.Context, params *ToolParams) (*MultipartToolResponse, error) {
-			return hook(ctx, params, next)
+			if !logger.FromContext(ctx).Enabled(ctx, slog.LevelDebug) {
+				return hook(ctx, params, next)
+			}
+			logger.Debug(ctx, "middleware hook started", "middleware", name, "hook", "tool", "tool", params.Tool.Name())
+			start := time.Now()
+			var nextCalled atomic.Bool
+			resp, err := hook(ctx, params, func(ctx context.Context, p *ToolParams) (*MultipartToolResponse, error) {
+				nextCalled.Store(true)
+				return next(ctx, p)
+			})
+			logger.Debug(ctx, "middleware hook finished",
+				hookLogArgs(name, "tool", start, nextCalled.Load(), err, "tool", params.Tool.Name())...)
+			return resp, err
 		}
 	}
 	return func(ctx context.Context, tool Tool, req *ToolRequest) (*MultipartToolResponse, error) {
@@ -1155,12 +1253,20 @@ type toolRunnerFunc = func(ctx context.Context, tool Tool, req *ToolRequest) (*M
 // either a new request to continue the conversation or nil if no tool requests
 // need handling.
 func handleToolRequests(ctx context.Context, r api.Registry, req *ModelRequest, resp *ModelResponse, cb ModelStreamCallback, messageIndex int, runTool toolRunnerFunc) (*ModelRequest, *Message, error) {
-	toolCount := len(resp.ToolRequests())
-	if toolCount == 0 {
+	toolRequests := resp.ToolRequests()
+	if len(toolRequests) == 0 {
 		return nil, nil, nil
 	}
 
-	resultChan := make(chan result[*MultipartToolResponse], toolCount)
+	if logger.FromContext(ctx).Enabled(ctx, slog.LevelDebug) {
+		toolNames := make([]string, 0, len(toolRequests))
+		for _, p := range toolRequests {
+			toolNames = append(toolNames, p.ToolRequest.Name)
+		}
+		logger.Debug(ctx, "executing tool requests", "tools", toolNames)
+	}
+
+	resultChan := make(chan result[*MultipartToolResponse], len(toolRequests))
 	toolMsg := &Message{Role: RoleTool}
 	revisedMsg := clone(resp.Message)
 
@@ -1179,7 +1285,7 @@ func handleToolRequests(ctx context.Context, r api.Registry, req *ModelRequest, 
 		streamMu.Lock()
 		defer streamMu.Unlock()
 		if err := cb(sendCtx, chunk); err != nil {
-			logger.FromContext(sendCtx).Debug("tool stream callback failed", "error", err)
+			logger.Debug(sendCtx, "tool stream callback failed, dropping chunk", "error", err)
 		}
 	}
 
@@ -1223,7 +1329,7 @@ func handleToolRequests(ctx context.Context, r api.Registry, req *ModelRequest, 
 			if err != nil {
 				var tie *toolInterruptError
 				if errors.As(err, &tie) {
-					logger.FromContext(ctx).Debug("tool %q triggered an interrupt: %v", toolReq.Name, tie.Metadata)
+					logger.Debug(ctx, "tool triggered an interrupt", "tool", toolReq.Name)
 
 					newPart := clone(p)
 					if newPart.Metadata == nil {
@@ -1259,9 +1365,9 @@ func handleToolRequests(ctx context.Context, r api.Registry, req *ModelRequest, 
 	// Tools run concurrently, so resultChan delivers responses in completion
 	// order. Collect them keyed by the request's position in the model message
 	// so they can be re-emitted in request order below.
-	toolRespByIndex := make(map[int]*Part, toolCount)
+	toolRespByIndex := make(map[int]*Part, len(toolRequests))
 	hasInterrupts := false
-	for range toolCount {
+	for range len(toolRequests) {
 		res := <-resultChan
 		if res.err != nil {
 			var tie *toolInterruptError
@@ -1420,6 +1526,10 @@ func (mr *ModelResponse) Interrupts() []*Part {
 }
 
 // Media returns the media content of the [ModelResponse] as a string.
+//
+// Only the first media part is returned, and its content type is left behind,
+// so a response carrying more than one image, or one whose content type is
+// needed to render it, is better read with [ModelResponse.MediaParts].
 func (mr *ModelResponse) Media() string {
 	if mr == nil || mr.Message == nil {
 		return ""
@@ -1432,8 +1542,22 @@ func (mr *ModelResponse) Media() string {
 	return ""
 }
 
-// Text returns the text content of the ModelResponseChunk as a string.
-// It returns an empty string if there is no Content in the response chunk.
+// MediaParts returns every media part of the [ModelResponse], each carrying its
+// content type alongside its data. It returns nil if the response has none.
+//
+// A model that may answer with media often answers with media alone, so this
+// pairs with [ModelResponse.Text] rather than replacing it: the two read
+// disjoint halves of a response and either may come back empty.
+func (mr *ModelResponse) MediaParts() []*Part {
+	if mr == nil {
+		return nil
+	}
+	return mr.Message.MediaParts()
+}
+
+// Text returns the text content of the ModelResponseChunk as a string,
+// concatenating its text parts and skipping every other kind, as
+// [Message.Text] does. It returns an empty string if the chunk has none.
 // For the parsed structured output, use [ModelResponseChunk.Output] instead.
 func (c *ModelResponseChunk) Text() string {
 	if c == nil {
@@ -1441,7 +1565,7 @@ func (c *ModelResponseChunk) Text() string {
 	}
 	var sb strings.Builder
 	for _, p := range c.Content {
-		if p.IsText() || p.IsData() {
+		if p.IsText() {
 			sb.WriteString(p.Text)
 		}
 	}
@@ -1557,8 +1681,15 @@ func extractTypedOutput[Out any](o outputer) (Out, error) {
 	}
 }
 
-// Text returns the contents of a [Message] as a string. It
-// returns an empty string if the message has no content.
+// Text returns the textual contents of a [Message] as a string, concatenating
+// its text parts and skipping every other kind. It returns an empty string if
+// the message has none, which is what a message carrying only an image, only
+// raw data, or only a tool request comes back as; read those with
+// [Message.MediaParts] and ToolRequests instead.
+//
+// A data part is deliberately not text: it holds a blob, which the plugins
+// send as bytes and [plugins/internal/uri.Data] decodes as a data: URI, so
+// concatenating one here would splice base64 into prose.
 // If you want to get reasoning from the message, use Reasoning() instead.
 func (m *Message) Text() string {
 	if m == nil {
@@ -1567,16 +1698,36 @@ func (m *Message) Text() string {
 	if len(m.Content) == 0 {
 		return ""
 	}
+	// Single-part messages are the common case and skip the builder, but they
+	// are still filtered: a lone media part is not this message's text.
 	if len(m.Content) == 1 {
-		return m.Content[0].Text
+		if p := m.Content[0]; p.IsText() {
+			return p.Text
+		}
+		return ""
 	}
 	var sb strings.Builder
 	for _, p := range m.Content {
-		if p.IsText() || p.IsData() {
+		if p.IsText() {
 			sb.WriteString(p.Text)
 		}
 	}
 	return sb.String()
+}
+
+// MediaParts returns every media part of a [Message], each carrying its content
+// type alongside its data. It returns nil if the message has none.
+func (m *Message) MediaParts() []*Part {
+	if m == nil {
+		return nil
+	}
+	var parts []*Part
+	for _, p := range m.Content {
+		if p.IsMedia() {
+			parts = append(parts, p)
+		}
+	}
+	return parts
 }
 
 // NewResume constructs a [GenerateActionResume] from Part slices.
@@ -1653,10 +1804,10 @@ func (ModelRef) JSONSchema() *jsonschema.Schema {
 	props := jsonschema.NewProperties()
 	props.Set("name", &jsonschema.Schema{
 		Type:        "string",
-		Description: "Model name (e.g. \"googleai/gemini-flash-latest\")",
+		Description: "Model name, e.g. \"googleai/gemini-flash-latest\".",
 	})
 	props.Set("config", &jsonschema.Schema{
-		Description: "Optional model configuration",
+		Description: "Optional model configuration, applied to this model only.",
 	})
 	return &jsonschema.Schema{
 		Type:       "object",
@@ -1765,7 +1916,7 @@ func handleResumedToolRequest(ctx context.Context, r api.Registry, genOpts *Gene
 				if err != nil {
 					var tie *toolInterruptError
 					if errors.As(err, &tie) {
-						logger.FromContext(ctx).Debug("tool %q triggered an interrupt: %v", restartPart.ToolRequest.Name, tie.Metadata)
+						logger.Debug(ctx, "restarted tool triggered an interrupt", "tool", restartPart.ToolRequest.Name)
 
 						interruptPart := clone(p)
 						if interruptPart.Metadata == nil {

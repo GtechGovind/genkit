@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/core/status"
 	"github.com/firebase/genkit/go/internal/base"
 	pluginjsonschema "github.com/firebase/genkit/go/plugins/internal/jsonschema"
 	"github.com/openai/openai-go"
@@ -224,7 +225,7 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		var err error
 		openaiConfig, err = base.MapToStruct[openai.ChatCompletionNewParams](normalizedConfig)
 		if err != nil {
-			g.err = fmt.Errorf("failed to convert config to openai.ChatCompletionNewParams: %w", err)
+			g.err = status.Errorf(status.ErrInvalidArgument, "failed to convert config to openai.ChatCompletionNewParams: %w", err)
 			return g
 		}
 		// Match the JS compat-oai adapter's config passthrough behavior. The
@@ -240,7 +241,7 @@ func (g *ModelGenerator) WithConfig(config any) *ModelGenerator {
 		}
 		openaiConfig.SetExtraFields(extraFields)
 	default:
-		g.err = fmt.Errorf("unexpected config type: %T", config)
+		g.err = status.Errorf(status.ErrInvalidArgument, "unexpected config type: %T", config)
 		return g
 	}
 
@@ -324,7 +325,7 @@ func (g *ModelGenerator) WithToolChoice(toolChoice ai.ToolChoice) *ModelGenerato
 	case ai.ToolChoiceAuto, ai.ToolChoiceNone, ai.ToolChoiceRequired:
 		g.request.ToolChoice.OfAuto = param.NewOpt(string(toolChoice))
 	default:
-		g.err = fmt.Errorf("unsupported tool choice: %q", toolChoice)
+		g.err = status.Errorf(status.ErrInvalidArgument, "unsupported tool choice: %q", toolChoice)
 	}
 
 	return g
@@ -390,7 +391,7 @@ func (g *ModelGenerator) Generate(ctx context.Context, req *ai.ModelRequest, han
 	}
 
 	if len(g.messages) == 0 {
-		return nil, fmt.Errorf("no messages provided")
+		return nil, status.Errorf(status.ErrInvalidArgument, "no messages provided")
 	}
 	g.request.Messages = g.messages
 
@@ -453,13 +454,16 @@ func getResponseFormat(output *ai.ModelOutputConfig) openai.ChatCompletionNewPar
 	return format
 }
 
+// concatenateTextContent joins a message's text parts, matching [ai.Message.Text].
+// A data part is skipped rather than concatenated: it carries a blob, so writing
+// it here would put base64 in the outbound message content.
 func concatenateTextContent(parts []*ai.Part) string {
 	var content strings.Builder
 	for _, part := range parts {
 		if part == nil {
 			continue
 		}
-		if part.IsText() || part.IsData() {
+		if part.IsText() {
 			content.WriteString(part.Text)
 		}
 	}
@@ -502,6 +506,13 @@ func (g *ModelGenerator) generateStream(ctx context.Context, req *ai.ModelReques
 	// The accumulator knows nothing of the citations xAI answers a live search
 	// with either, so they are carried out of the chunk that has them.
 	var citations any
+	// An error object a provider attaches to a failing choice is raw JSON the
+	// accumulator drops with the rest, so it too is carried out by hand. That
+	// is the shape of a failure a gateway reports on the response as a whole; a
+	// failure part-way through a stream is reported at the top level of a chunk
+	// instead, which ends the stream rather than reaching this loop. See
+	// [wrapStreamError].
+	var failure map[string]any
 
 	for stream.Next() {
 		chunk := stream.Current()
@@ -520,13 +531,19 @@ func (g *ModelGenerator) generateStream(ctx context.Context, req *ai.ModelReques
 			continue
 		}
 
+		if value := extractErrorObject(chunk.Choices[0].JSON.ExtraFields["error"].Raw()); value != nil {
+			failure = value
+		}
+
 		// Create chunk for callback
 		modelChunk := &ai.ModelResponseChunk{}
 
-		// Some OpenAI-compatible reasoning models, including Kimi, return
-		// reasoning in the non-standard reasoning_content field.
-		if reasoningDelta := extractReasoningContent(
+		// Some OpenAI-compatible reasoning models return reasoning in a
+		// non-standard field: reasoning_content for Kimi and DeepSeek,
+		// reasoning for OpenRouter.
+		if reasoningDelta := firstReasoning(
 			chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"].Raw(),
+			chunk.Choices[0].Delta.JSON.ExtraFields["reasoning"].Raw(),
 		); reasoningDelta != "" {
 			reasoning.WriteString(reasoningDelta)
 			modelChunk.Content = append(modelChunk.Content, ai.NewReasoningPart(reasoningDelta, nil))
@@ -557,8 +574,14 @@ func (g *ModelGenerator) generateStream(ctx context.Context, req *ai.ModelReques
 		}
 	}
 
+	// NewStreaming defers its HTTP error to the stream, so a 4xx on the request
+	// that opened it surfaces here rather than at the call, as does a gateway's
+	// mid-stream failure. Whatever was generated before the failure has already
+	// reached the callback, and the aggregate response is dropped: a caller and
+	// the middleware around it are told the generation failed, rather than
+	// handed a short answer that reads as a complete one.
 	if err := stream.Err(); err != nil {
-		return nil, fmt.Errorf("stream error: %w", err)
+		return nil, wrapStreamError(err)
 	}
 
 	if usageSeen {
@@ -576,17 +599,60 @@ func (g *ModelGenerator) generateStream(ctx context.Context, req *ai.ModelReques
 			resp.Message.Content...,
 		)
 	}
-	if citations != nil {
+	// The message the failing upstream sent rode on a chunk's raw choice, so
+	// it is restored here; a refusal, which the accumulator does keep, wins as
+	// the more specific reason.
+	if message, _ := failure["message"].(string); message != "" &&
+		resp.FinishMessage == "" && resp.FinishReason != ai.FinishReasonStop {
+		resp.FinishMessage = message
+	}
+	if citations != nil || failure != nil {
 		custom, ok := resp.Custom.(map[string]any)
 		if !ok {
 			custom = map[string]any{}
 		}
-		custom["citations"] = citations
+		if citations != nil {
+			custom["citations"] = citations
+		}
+		if failure != nil {
+			custom["error"] = failure
+		}
 		resp.Custom = custom
 		resp.Raw = custom
 	}
 	resp.Request = req
 	return resp, nil
+}
+
+// wrapStreamError classifies the error a stream ended with, so that
+// status-aware middleware can tell a rate limit from a request the provider
+// will refuse again.
+//
+// A gateway whose upstream fails part-way through a generation reports it as an
+// error object at the top level of a chunk. The SDK looks for that field before
+// it unmarshals and ends the stream when it finds one, so the chunk never
+// reaches the caller and the object survives only as raw JSON inside the error
+// message. Reading the code back out of it is the one way to recover the status
+// the failure carries.
+//
+// An error that classifies to nothing is left unclassified rather than marked
+// Unknown, since the retry middleware reissues an unclassified error and gives
+// up on an Unknown one, and a failure this cannot read is not a reason to stop
+// trying.
+func wrapStreamError(err error) error {
+	err = WrapAPIError(err)
+	if _, classified := status.Classified(err); classified {
+		return fmt.Errorf("stream error: %w", err)
+	}
+	message := err.Error()
+	if brace := strings.IndexByte(message, '{'); brace >= 0 {
+		if code, ok := extractErrorObject(message[brace:])["code"].(float64); ok {
+			if name := status.FromHTTPCode(int(code)); name != status.Unknown {
+				return status.Errorf(status.Base(name), "stream error: %w", err)
+			}
+		}
+	}
+	return fmt.Errorf("stream error: %w", err)
 }
 
 // extractTokenCount reads a token count a provider reports as a usage field the
@@ -628,10 +694,34 @@ func extractReasoningContent(raw string) string {
 	return reasoning
 }
 
+// firstReasoning returns the first non-empty reasoning string among raws, the
+// raw JSON of the response fields a provider may carry reasoning in. None of
+// them is in the OpenAI schema and providers disagree on the name, so the
+// caller passes every field it knows in preference order; a provider sending
+// two of them is read once rather than appended twice.
+func firstReasoning(raws ...string) string {
+	for _, raw := range raws {
+		if reasoning := extractReasoningContent(raw); reasoning != "" {
+			return reasoning
+		}
+	}
+	return ""
+}
+
+// extractErrorObject decodes the error object a provider returns beside a
+// choice when an upstream fails mid-generation, or nil when the field is
+// absent or is not an object. The object is kept whole: its message becomes
+// the finish message, and the code and metadata beside it, which name the
+// upstream provider and the failure class, ride on the response's Raw.
+func extractErrorObject(raw string) map[string]any {
+	failure, _ := extractJSONValue(raw).(map[string]any)
+	return failure
+}
+
 // convertChatCompletionToModelResponse converts openai.ChatCompletion to ai.ModelResponse
 func convertChatCompletionToModelResponse(completion *openai.ChatCompletion) (*ai.ModelResponse, error) {
 	if len(completion.Choices) == 0 {
-		return nil, fmt.Errorf("no choices in completion")
+		return nil, status.Errorf(status.ErrInvalidOutput, "no choices in completion")
 	}
 
 	choice := completion.Choices[0]
@@ -669,6 +759,17 @@ func convertChatCompletionToModelResponse(completion *openai.ChatCompletion) (*a
 		completion.Usage.JSON.ExtraFields["num_sources_used"].Raw()))
 	addCustomTokens(usage, "imageTokens", extractTokenCount(
 		completion.Usage.PromptTokensDetails.JSON.ExtraFields["image_tokens"].Raw()))
+	// A gateway prices the request it routed and reports what it charged, which
+	// is a main reason to route through one. Unlike the counts above, presence
+	// decides rather than the value: a free-tier request is priced at an
+	// explicit zero, which is an answer, while a provider that does not price
+	// requests has no cost field at all.
+	if cost, ok := extractJSONValue(completion.Usage.JSON.ExtraFields["cost"].Raw()).(float64); ok {
+		if usage.Custom == nil {
+			usage.Custom = make(map[string]float64)
+		}
+		usage.Custom["cost"] = cost
+	}
 
 	resp := &ai.ModelResponse{
 		Usage: usage,
@@ -688,10 +789,22 @@ func convertChatCompletionToModelResponse(completion *openai.ChatCompletion) (*a
 		resp.FinishReason = ai.FinishReasonLength
 	case "content_filter", "sensitive":
 		resp.FinishReason = ai.FinishReasonBlocked
-	case "function_call", "network_error", "insufficient_system_resource":
+	case "error", "function_call", "network_error", "insufficient_system_resource":
 		resp.FinishReason = ai.FinishReasonOther
 	default:
 		resp.FinishReason = ai.FinishReasonUnknown
+	}
+
+	// A provider that fails part-way through a generation is answered by a
+	// gateway with a 200: the status and headers are already committed, so the
+	// failure rides on the choice as finish_reason "error" and an error object,
+	// next to whatever text was produced first. Reading that object is what
+	// tells a failed request apart from a complete answer, since the response
+	// is otherwise well-formed. A choice that finished cleanly keeps an empty
+	// FinishMessage even when an error-shaped extra rides beside it.
+	failure := extractErrorObject(choice.JSON.ExtraFields["error"].Raw())
+	if message, _ := failure["message"].(string); message != "" && resp.FinishReason != ai.FinishReasonStop {
+		resp.FinishMessage = message
 	}
 
 	// Set finish message if there's a refusal
@@ -701,9 +814,12 @@ func convertChatCompletionToModelResponse(completion *openai.ChatCompletion) (*a
 	}
 
 	// Keep parity with the JS compat-oai plugin by surfacing the non-standard
-	// reasoning_content field as a Genkit reasoning part.
-	if reasoning := extractReasoningContent(
+	// reasoning field as a Genkit reasoning part. DeepSeek and Kimi name it
+	// reasoning_content; OpenRouter normalizes every vendor it fronts onto
+	// reasoning.
+	if reasoning := firstReasoning(
 		choice.Message.JSON.ExtraFields["reasoning_content"].Raw(),
+		choice.Message.JSON.ExtraFields["reasoning"].Raw(),
 	); reasoning != "" {
 		resp.Message.Content = append(resp.Message.Content, ai.NewReasoningPart(reasoning, nil))
 	}
@@ -741,6 +857,12 @@ func convertChatCompletionToModelResponse(completion *openai.ChatCompletion) (*a
 	if citations := extractJSONValue(completion.JSON.ExtraFields["citations"].Raw()); citations != nil {
 		custom["citations"] = citations
 	}
+	// The error object rides whole beside the finish message it fed: the code
+	// and the typed error_type saying which class of failure it was have no
+	// [ai.ModelResponse] field but belong to the response's metadata.
+	if failure != nil {
+		custom["error"] = failure
+	}
 	// Raw carries the same metadata as Custom, which is deprecated in favor of
 	// it: new fields are documented against Raw, and the readers of the older
 	// one keep working.
@@ -770,7 +892,7 @@ func addCustomTokens(usage *ai.GenerationUsage, name string, count int) {
 func (g *ModelGenerator) generateComplete(ctx context.Context, req *ai.ModelRequest) (*ai.ModelResponse, error) {
 	completion, err := g.client.Chat.Completions.New(ctx, *g.request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create completion: %w", err)
+		return nil, fmt.Errorf("failed to create completion: %w", WrapAPIError(err))
 	}
 
 	resp, err := convertChatCompletionToModelResponse(completion)
@@ -826,7 +948,7 @@ func convertToolCall(part *ai.Part) (*openai.ChatCompletionMessageToolCallParam,
 func jsonStringToMap(jsonString string) (map[string]any, error) {
 	var result map[string]any
 	if err := json.Unmarshal([]byte(jsonString), &result); err != nil {
-		return nil, fmt.Errorf("unmarshal failed to parse json string %s: %w", jsonString, err)
+		return nil, status.Errorf(status.ErrInvalidOutput, "unmarshal failed to parse json string %s: %w", jsonString, err)
 	}
 	return result, nil
 }
@@ -834,7 +956,7 @@ func jsonStringToMap(jsonString string) (map[string]any, error) {
 func anyToJSONString(data any) (string, error) {
 	jsonBytes, err := json.Marshal(data)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal any to JSON string: data, %#v %w", data, err)
+		return "", status.Errorf(status.ErrInvalidArgument, "failed to marshal any to JSON string: data %#v: %w", data, err)
 	}
 	return string(jsonBytes), nil
 }

@@ -17,6 +17,7 @@ package compat_oai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,45 +26,58 @@ import (
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/core/status"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
 )
 
-func TestConvertChatCompletionToModelResponseReasoningContent(t *testing.T) {
-	var completion openai.ChatCompletion
-	if err := json.Unmarshal([]byte(`{
-		"id": "chatcmpl-1",
-		"object": "chat.completion",
-		"created": 1,
-		"model": "reasoning-model",
-		"choices": [{
-			"index": 0,
-			"message": {
-				"role": "assistant",
-				"reasoning_content": "Let me think...",
-				"content": "Final answer"
-			},
-			"finish_reason": "stop"
-		}]
-	}`), &completion); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
+// TestConvertChatCompletionToModelResponseReasoning covers the non-standard
+// fields a provider may carry reasoning in: DeepSeek and Kimi send
+// reasoning_content, OpenRouter sends reasoning. A provider sending both must
+// still yield one reasoning part rather than two.
+func TestConvertChatCompletionToModelResponseReasoning(t *testing.T) {
+	for name, field := range map[string]string{
+		"reasoning_content": `"reasoning_content": "Let me think...",`,
+		"reasoning":         `"reasoning": "Let me think...",`,
+		"both":              `"reasoning_content": "Let me think...", "reasoning": "Let me think...",`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var completion openai.ChatCompletion
+			if err := json.Unmarshal([]byte(`{
+				"id": "chatcmpl-1",
+				"object": "chat.completion",
+				"created": 1,
+				"model": "reasoning-model",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						`+field+`
+						"content": "Final answer"
+					},
+					"finish_reason": "stop"
+				}]
+			}`), &completion); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
 
-	resp, err := convertChatCompletionToModelResponse(&completion)
-	if err != nil {
-		t.Fatalf("convertChatCompletionToModelResponse() error = %v", err)
-	}
-	if got := resp.Reasoning(); got != "Let me think..." {
-		t.Errorf("Reasoning() = %q, want %q", got, "Let me think...")
-	}
-	if got := resp.Text(); got != "Final answer" {
-		t.Errorf("Text() = %q, want %q", got, "Final answer")
-	}
-	if len(resp.Message.Content) != 2 ||
-		!resp.Message.Content[0].IsReasoning() ||
-		!resp.Message.Content[1].IsText() {
-		t.Fatalf("content = %#v, want reasoning followed by text", resp.Message.Content)
+			resp, err := convertChatCompletionToModelResponse(&completion)
+			if err != nil {
+				t.Fatalf("convertChatCompletionToModelResponse() error = %v", err)
+			}
+			if got := resp.Reasoning(); got != "Let me think..." {
+				t.Errorf("Reasoning() = %q, want %q", got, "Let me think...")
+			}
+			if got := resp.Text(); got != "Final answer" {
+				t.Errorf("Text() = %q, want %q", got, "Final answer")
+			}
+			if len(resp.Message.Content) != 2 ||
+				!resp.Message.Content[0].IsReasoning() ||
+				!resp.Message.Content[1].IsText() {
+				t.Fatalf("content = %#v, want reasoning followed by text", resp.Message.Content)
+			}
+		})
 	}
 }
 
@@ -138,6 +152,8 @@ func TestConvertChatCompletionToModelResponseProviderFinishReasons(t *testing.T)
 		"model_context_window_exceeded": ai.FinishReasonLength,
 		"network_error":                 ai.FinishReasonOther,
 		"insufficient_system_resource":  ai.FinishReasonOther,
+		// A gateway reports an upstream provider failure this way, on a 200.
+		"error": ai.FinishReasonOther,
 		// xAI documents three finish reasons and this is one of them, so an
 		// unmapped end_turn would report ordinary answers as unknown.
 		"end_turn": ai.FinishReasonStop,
@@ -296,6 +312,150 @@ func TestConvertChatCompletionToModelResponseSearchUsage(t *testing.T) {
 	}
 }
 
+// TestConvertChatCompletionToModelResponseCost pins that the price a gateway
+// charged for a request survives, as the fraction it arrived as. Knowing what
+// a request cost is a main reason to route through a gateway, and the value is
+// a usage field the OpenAI SDK does not model.
+// TestConvertChatCompletionToModelResponseCost pins that the price a gateway
+// reports reaches the usage on presence rather than value: a free-tier request
+// is priced at an explicit zero, which is an answer, while a provider that
+// does not price requests has no cost field and must not gain one.
+func TestConvertChatCompletionToModelResponseCost(t *testing.T) {
+	for name, tc := range map[string]struct {
+		usage string
+		want  float64
+		keyed bool
+	}{
+		"fraction kept":       {`{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cost":0.00042}`, 0.00042, true},
+		"explicit zero kept":  {`{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cost":0}`, 0, true},
+		"absent stays absent": {`{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}`, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var completion openai.ChatCompletion
+			if err := json.Unmarshal([]byte(`{
+				"id":"1","object":"chat.completion","created":1,"model":"openai/gpt-5",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],
+				"usage":`+tc.usage+`
+			}`), &completion); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+
+			resp, err := convertChatCompletionToModelResponse(&completion)
+			if err != nil {
+				t.Fatalf("convertChatCompletionToModelResponse() error = %v", err)
+			}
+			got, keyed := resp.Usage.Custom["cost"]
+			if keyed != tc.keyed {
+				t.Errorf("Usage.Custom has \"cost\" = %t, want %t", keyed, tc.keyed)
+			}
+			if got != tc.want {
+				t.Errorf("Usage.Custom[\"cost\"] = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConvertChatCompletionToModelResponseProviderFailure pins that a provider
+// failing part-way through a generation is not read as a complete answer. The
+// gateway has already committed a 200 by then, so the response is well-formed
+// and carries the text produced before the failure; the reason it stopped is
+// only in the error object beside the choice.
+func TestConvertChatCompletionToModelResponseProviderFailure(t *testing.T) {
+	var completion openai.ChatCompletion
+	if err := json.Unmarshal([]byte(`{
+		"id":"1","object":"chat.completion","created":1,"model":"openai/gpt-5",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"partial out"},
+			"finish_reason":"error","native_finish_reason":"provider_error",
+			"error":{"code":502,"message":"Provider returned error","metadata":{"error_type":"provider_unavailable"}}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}
+	}`), &completion); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	resp, err := convertChatCompletionToModelResponse(&completion)
+	if err != nil {
+		t.Fatalf("convertChatCompletionToModelResponse() error = %v", err)
+	}
+	if resp.FinishReason != ai.FinishReasonOther {
+		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, ai.FinishReasonOther)
+	}
+	if want := "Provider returned error"; resp.FinishMessage != want {
+		t.Errorf("FinishMessage = %q, want %q so the caller can tell a failure from an answer",
+			resp.FinishMessage, want)
+	}
+	// The partial output is what the gateway returns the 200 for, so it stays.
+	if want := "partial out"; resp.Text() != want {
+		t.Errorf("Text() = %q, want %q", resp.Text(), want)
+	}
+	// The code and the typed error_type ride whole on the response metadata:
+	// telling a rate limit from a dead upstream needs them, and the finish
+	// message carries only the prose.
+	custom, _ := resp.Custom.(map[string]any)
+	failure, _ := custom["error"].(map[string]any)
+	if got, _ := failure["code"].(float64); got != 502 {
+		t.Errorf("custom[error][code] = %v, want 502", failure["code"])
+	}
+	metadata, _ := failure["metadata"].(map[string]any)
+	if want := "provider_unavailable"; metadata["error_type"] != want {
+		t.Errorf("custom[error][metadata][error_type] = %v, want %q", metadata["error_type"], want)
+	}
+}
+
+// TestConvertChatCompletionToModelResponseErrorBesideStop pins that a choice
+// that finished cleanly keeps an empty FinishMessage even when an error-shaped
+// extra rides beside it: a finish message on a stop reads as the reason
+// generation ended, which a warning is not. The object itself still reaches
+// the response metadata.
+func TestConvertChatCompletionToModelResponseErrorBesideStop(t *testing.T) {
+	var completion openai.ChatCompletion
+	if err := json.Unmarshal([]byte(`{
+		"id":"1","object":"chat.completion","created":1,"model":"openai/gpt-5",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"answer"},
+			"finish_reason":"stop",
+			"error":{"code":299,"message":"deprecation warning"}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}
+	}`), &completion); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	resp, err := convertChatCompletionToModelResponse(&completion)
+	if err != nil {
+		t.Fatalf("convertChatCompletionToModelResponse() error = %v", err)
+	}
+	if resp.FinishReason != ai.FinishReasonStop {
+		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, ai.FinishReasonStop)
+	}
+	if resp.FinishMessage != "" {
+		t.Errorf("FinishMessage = %q, want empty on a choice that finished cleanly", resp.FinishMessage)
+	}
+	custom, _ := resp.Custom.(map[string]any)
+	if _, ok := custom["error"].(map[string]any); !ok {
+		t.Errorf("custom[error] = %#v, want the object kept on the metadata", custom["error"])
+	}
+}
+
+// TestConvertChatCompletionToModelResponseNoErrorObject pins that an ordinary
+// answer reports no finish message, so the failure path above cannot report
+// one where there was no failure.
+func TestConvertChatCompletionToModelResponseNoErrorObject(t *testing.T) {
+	var completion openai.ChatCompletion
+	if err := json.Unmarshal([]byte(`{
+		"id":"1","object":"chat.completion","created":1,"model":"openai/gpt-5",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}
+	}`), &completion); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	resp, err := convertChatCompletionToModelResponse(&completion)
+	if err != nil {
+		t.Fatalf("convertChatCompletionToModelResponse() error = %v", err)
+	}
+	if resp.FinishMessage != "" {
+		t.Errorf("FinishMessage = %q, want empty on a response carrying no error", resp.FinishMessage)
+	}
+}
+
 // TestGenerateStreamReportsUsage pins that a stream asks for its token usage
 // and reports every part of it. The usage rides on a final chunk the request
 // has to opt into, and [openai.ChatCompletionAccumulator] sums only the three
@@ -318,7 +478,7 @@ func TestGenerateStreamReportsUsage(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, event := range []string{
 			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"answer"},"finish_reason":null},{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}`,
-			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17,"prompt_cache_hit_tokens":6,"prompt_cache_miss_tokens":4,"completion_tokens_details":{"reasoning_tokens":5}}}`,
+			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":7,"total_tokens":17,"prompt_cache_hit_tokens":6,"prompt_cache_miss_tokens":4,"completion_tokens_details":{"reasoning_tokens":5},"cost":0.00042}}`,
 		} {
 			_, _ = io.WriteString(w, "data: "+event+"\n\n")
 		}
@@ -353,6 +513,11 @@ func TestGenerateStreamReportsUsage(t *testing.T) {
 		if tc.got != tc.want {
 			t.Errorf("%s = %d, want %d", tc.field, tc.got, tc.want)
 		}
+	}
+	// The price rides on the same final chunk and is a fraction, so it is
+	// checked apart from the counts.
+	if got := resp.Usage.Custom["cost"]; got != 0.00042 {
+		t.Errorf("Usage.Custom[\"cost\"] = %v, want 0.00042 carried out of the stream", got)
 	}
 }
 
@@ -390,6 +555,130 @@ func TestGenerateStreamReportsCitations(t *testing.T) {
 	}
 	if resp.FinishReason != ai.FinishReasonStop {
 		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, ai.FinishReasonStop)
+	}
+}
+
+// TestGenerateStreamReportsProviderFailure covers a stream whose failing choice
+// carries the error object, the shape a gateway reports a failure on the
+// response as a whole with. It is told apart from a complete answer the same
+// way a non-streamed one is: the object rides on a chunk's raw choice, which
+// [openai.ChatCompletionAccumulator] rebuilds from the fields it models, so the
+// failure is lost unless it is carried out of the stream directly. A failure
+// reported at the top level of a chunk takes the other path, covered by
+// [TestGenerateStreamTopLevelFailureEndsStream].
+func TestGenerateStreamReportsProviderFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []string{
+			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"openai/gpt-5","choices":[{"index":0,"delta":{"role":"assistant","content":"partial out"},"finish_reason":null}]}`,
+			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"openai/gpt-5","choices":[{"index":0,"delta":{},"finish_reason":"error","native_finish_reason":"provider_error","error":{"code":502,"message":"Provider returned error","metadata":{"error_type":"provider_unavailable"}}}]}`,
+		} {
+			_, _ = io.WriteString(w, "data: "+event+"\n\n")
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	client := openai.NewClient(option.WithBaseURL(srv.URL), option.WithAPIKey("stub"))
+	messages := []*ai.Message{ai.NewUserTextMessage("hi")}
+	resp, err := NewModelGenerator(&client, "openai/gpt-5").
+		WithMessages(messages).
+		Generate(context.Background(), &ai.ModelRequest{Messages: messages},
+			func(context.Context, *ai.ModelResponseChunk) error { return nil })
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	if resp.FinishReason != ai.FinishReasonOther {
+		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, ai.FinishReasonOther)
+	}
+	if want := "Provider returned error"; resp.FinishMessage != want {
+		t.Errorf("FinishMessage = %q, want %q carried out of the stream", resp.FinishMessage, want)
+	}
+	// The partial output is what the gateway returns the 200 for, so it stays.
+	if want := "partial out"; resp.Text() != want {
+		t.Errorf("Text() = %q, want %q", resp.Text(), want)
+	}
+	custom, _ := resp.Custom.(map[string]any)
+	failure, _ := custom["error"].(map[string]any)
+	if got, _ := failure["code"].(float64); got != 502 {
+		t.Errorf("custom[error][code] = %v, want 502", failure["code"])
+	}
+}
+
+// TestGenerateStreamTopLevelFailureEndsStream covers the other shape: a gateway
+// whose upstream dies part-way through a stream reports it at the top level of
+// a chunk rather than on the choice. The SDK looks for that field before it
+// unmarshals and ends the stream when it finds one, so the chunk never reaches
+// the loop and no response is assembled.
+//
+// What the model generated first has already reached the callback, so the test
+// pins that too: the failure costs the aggregate response, not the output. That
+// is what keeps the failure retryable, since retry and fallback middleware read
+// the error rather than the finish reason, and a truncated answer returned as a
+// success would reach neither.
+func TestGenerateStreamTopLevelFailureEndsStream(t *testing.T) {
+	// The code the gateway reports decides the status the failure carries. A
+	// code that maps to nothing stays unclassified rather than becoming
+	// Unknown, which the retry middleware would give up on.
+	for name, tc := range map[string]struct {
+		code int
+		want status.Name
+	}{
+		"rate limited upstream": {code: 429, want: status.ResourceExhausted},
+		"dead upstream":         {code: 502, want: status.Internal},
+		"unmapped code":         {code: 402, want: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, event := range []string{
+					`{"id":"1","object":"chat.completion.chunk","created":1,"model":"openai/gpt-5","choices":[{"index":0,"delta":{"role":"assistant","content":"partial out"},"finish_reason":null}]}`,
+					fmt.Sprintf(`{"id":"1","object":"chat.completion.chunk","created":1,"model":"openai/gpt-5","provider":"Together","error":{"code":%d,"message":"Provider disconnected","metadata":{"error_type":"provider_unavailable"}},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error","native_finish_reason":"provider_error"}]}`, tc.code),
+				} {
+					_, _ = io.WriteString(w, "data: "+event+"\n\n")
+				}
+				_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			}))
+			t.Cleanup(srv.Close)
+
+			client := openai.NewClient(option.WithBaseURL(srv.URL), option.WithAPIKey("stub"))
+			messages := []*ai.Message{ai.NewUserTextMessage("hi")}
+			var streamed strings.Builder
+			resp, err := NewModelGenerator(&client, "openai/gpt-5").
+				WithMessages(messages).
+				Generate(context.Background(), &ai.ModelRequest{Messages: messages},
+					func(_ context.Context, chunk *ai.ModelResponseChunk) error {
+						streamed.WriteString(chunk.Text())
+						return nil
+					})
+			if err == nil {
+				t.Fatal("Generate() error = nil, want the stream failure reported")
+			}
+			if resp != nil {
+				t.Errorf("Generate() response = %v, want nil", resp)
+			}
+			// The generated text is not lost with the response: a streaming
+			// caller was handed it as it arrived.
+			if want := "partial out"; streamed.String() != want {
+				t.Errorf("streamed text = %q, want %q", streamed.String(), want)
+			}
+			// The gateway's own wording is what says which upstream failed and
+			// why, so it has to survive the wrapping.
+			if want := "Provider disconnected"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to carry %q", err, want)
+			}
+			got, classified := status.Classified(err)
+			if tc.want == "" {
+				if classified {
+					t.Errorf("status = %q, want the error left unclassified", got)
+				}
+				return
+			}
+			if !classified || got != tc.want {
+				t.Errorf("status = %q (classified %v), want %q", got, classified, tc.want)
+			}
+		})
 	}
 }
 
@@ -501,16 +790,19 @@ func TestWithParams(t *testing.T) {
 	}
 }
 
-func TestConcatenateContentSkipsNilParts(t *testing.T) {
+// Only text parts become message content. A data part carries a blob, so
+// concatenating it would put base64 on the wire; this matches [ai.Message.Text].
+func TestConcatenateContentSkipsNonTextParts(t *testing.T) {
 	parts := []*ai.Part{
 		nil,
 		ai.NewTextPart("visible"),
 		ai.NewReasoningPart("thought", nil),
 		nil,
-		ai.NewDataPart(" data"),
+		ai.NewDataPart("data:application/octet-stream;base64,AAAA"),
+		ai.NewMediaPart("image/png", "data:image/png;base64,AAAA"),
 	}
-	if got := concatenateTextContent(parts); got != "visible data" {
-		t.Errorf("concatenateTextContent() = %q, want %q", got, "visible data")
+	if got := concatenateTextContent(parts); got != "visible" {
+		t.Errorf("concatenateTextContent() = %q, want %q", got, "visible")
 	}
 	if got := concatenateReasoningContent(parts); got != "thought" {
 		t.Errorf("concatenateReasoningContent() = %q, want %q", got, "thought")

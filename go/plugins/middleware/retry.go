@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/core/logger"
 	"github.com/firebase/genkit/go/core/status"
 )
 
@@ -71,27 +72,27 @@ var sleepFunc = func(ctx context.Context, d time.Duration) error {
 //	)
 type Retry struct {
 	// MaxRetries is the maximum number of retry attempts. Defaults to 3.
-	MaxRetries int `json:"maxRetries,omitempty"`
+	MaxRetries int `json:"maxRetries,omitempty" jsonschema_description:"Maximum number of retry attempts. Defaults to 3."`
 	// Statuses is the set of status codes that trigger a retry for classified
 	// errors; unclassified errors are always retried regardless of this list.
 	// Defaults to [defaultRetryStatuses].
-	Statuses []status.Name `json:"statuses,omitempty"`
+	Statuses []status.Name `json:"statuses,omitempty" jsonschema_description:"Status codes that trigger a retry for classified errors. Unclassified errors are always retried regardless of this list. Defaults to UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED, ABORTED and INTERNAL." jsonschema:"enum=OK,enum=CANCELLED,enum=UNKNOWN,enum=INVALID_ARGUMENT,enum=DEADLINE_EXCEEDED,enum=NOT_FOUND,enum=ALREADY_EXISTS,enum=PERMISSION_DENIED,enum=UNAUTHENTICATED,enum=RESOURCE_EXHAUSTED,enum=FAILED_PRECONDITION,enum=ABORTED,enum=OUT_OF_RANGE,enum=UNIMPLEMENTED,enum=INTERNAL,enum=UNAVAILABLE,enum=DATA_LOSS"`
 	// InitialDelayMs is the delay before the first retry, in milliseconds. Defaults to 1000.
-	InitialDelayMs int `json:"initialDelayMs,omitempty"`
+	InitialDelayMs int `json:"initialDelayMs,omitempty" jsonschema_description:"Delay before the first retry, in milliseconds. Defaults to 1000."`
 	// MaxDelayMs is the upper bound on retry delay, in milliseconds. Defaults to 60000.
-	MaxDelayMs int `json:"maxDelayMs,omitempty"`
+	MaxDelayMs int `json:"maxDelayMs,omitempty" jsonschema_description:"Upper bound on the retry delay, in milliseconds. Defaults to 60000."`
 	// BackoffFactor is the multiplier applied to the delay after each retry. Defaults to 2.
-	BackoffFactor float64 `json:"backoffFactor,omitempty"`
+	BackoffFactor float64 `json:"backoffFactor,omitempty" jsonschema_description:"Multiplier applied to the delay after each retry. Defaults to 2."`
 	// NoJitter disables random jitter on the delay. Jitter helps prevent
 	// thundering-herd problems when many clients retry simultaneously.
-	NoJitter bool `json:"noJitter,omitempty"`
+	NoJitter bool `json:"noJitter,omitempty" jsonschema_description:"Disables random jitter on the delay. Jitter helps prevent thundering-herd problems when many clients retry at the same time. Defaults to false."`
 }
 
 // Name implements [ai.Middleware].
-func (r *Retry) Name() string { return provider + "/retry" }
+func (r Retry) Name() string { return provider + "/retry" }
 
 // New implements [ai.Middleware], hooking the model stage.
-func (r *Retry) New(ctx context.Context) (*ai.Hooks, error) {
+func (r Retry) New(ctx context.Context) (*ai.Hooks, error) {
 	return &ai.Hooks{
 		WrapModel: r.wrapModel,
 	}, nil
@@ -158,6 +159,12 @@ func (r *Retry) wrapModel(ctx context.Context, params *ai.ModelParams, next ai.M
 			jitter := time.Duration(float64(time.Second) * math.Pow(2, float64(attempt)) * rand.Float64())
 			delay += jitter
 		}
+
+		logger.Debug(ctx, "model call failed, retrying",
+			"attempt", attempt+1,
+			"maxRetries", maxRetries,
+			"delay", delay.Round(time.Millisecond),
+			"error", err)
 
 		// Bail out if the caller disconnected mid-backoff; no reason to wait
 		// out the delay (or issue another retry) for a caller who has left.
