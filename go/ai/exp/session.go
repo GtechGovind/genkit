@@ -245,8 +245,8 @@ func readSnapshot[State any](
 	// Return a normalized copy: the documented defaults (empty status means
 	// completed, zero UpdatedAt means CreatedAt) are resolved here so every
 	// caller sees the same shaping, and the state transform shapes what leaves
-	// the server. A failed snapshot's state is its last-good state, so it is
-	// returned like any other.
+	// the server. A failed snapshot's state is what its turn committed, so it
+	// is returned like any other row's.
 	resp := *snap
 	// Surface a pending snapshot whose heartbeat has gone stale as expired: its
 	// detached background worker is presumed dead, so report the orphan rather
@@ -289,7 +289,7 @@ func newSnapshotActions[State any](
 	if store == nil {
 		return nil, nil
 	}
-	getSnapshotAction := core.NewAction(agentName, api.ActionTypeAgentSnapshot, nil, nil,
+	getSnapshotAction := core.NewActionOf(api.ActionTypeAgentSnapshot, agentName, nil,
 		func(ctx context.Context, req *GetSnapshotRequest) (*SessionSnapshot[State], error) {
 			if req == nil || (req.SnapshotID == "" && req.SessionID == "") {
 				return nil, status.Errorf(status.ErrInvalidArgument, "getSnapshot: snapshotId or sessionId is required")
@@ -303,7 +303,7 @@ func newSnapshotActions[State any](
 		// abort lifecycle is unsupported; don't surface the action.
 		return getSnapshotAction, nil
 	}
-	abortAction := core.NewAction(agentName, api.ActionTypeAgentAbort, nil, nil,
+	abortAction := core.NewActionOf(api.ActionTypeAgentAbort, agentName, nil,
 		func(ctx context.Context, req *AgentAbortRequest) (*AgentAbortResponse, error) {
 			if req == nil || req.SnapshotID == "" {
 				return nil, status.Errorf(status.ErrInvalidArgument, "abort: snapshotId is required")

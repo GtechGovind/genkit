@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"regexp"
 	"slices"
@@ -35,12 +34,19 @@ import (
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/core/api"
+	"github.com/firebase/genkit/go/core/logger"
 	"github.com/firebase/genkit/go/genkit"
+	"github.com/firebase/genkit/go/plugins/internal"
 	"github.com/firebase/genkit/go/plugins/internal/uri"
 	"github.com/invopop/jsonschema"
 )
 
-const provider = "ollama"
+const (
+	provider                       = "ollama"
+	modelCapabilitiesTimeout       = 5 * time.Second
+	capabilityFailureCacheLifetime = 30 * time.Second
+	maxConcurrentCapabilityQueries = 4
+)
 
 var (
 	mediaSupportedModels = []string{"llava", "bakllava", "llava-llama3", "llava:13b", "llava:7b", "llava:latest", "gemma3:4b", "gemma3:12b", "gemma3:27b"}
@@ -59,9 +65,8 @@ var (
 		ai.RoleSystem: "system",
 		ai.RoleTool:   "tool",
 	}
-	// defaultOllamaSupports defines the default capabilities for dynamically
-	// discovered Ollama models. All capabilities are enabled since local models
-	// vary widely and we can't query their capabilities individually.
+	// defaultOllamaSupports preserves the historical fallback for dynamically
+	// discovered Ollama models when capability detection is unavailable.
 	defaultOllamaSupports = ai.ModelSupports{
 		Multiturn:  true,
 		Media:      true,
@@ -80,15 +85,91 @@ type ollamaTagsResponse struct {
 	Models []ollamaLocalModel `json:"models"`
 }
 
-// ollamaLocalModel represents a locally available Ollama model.
+// ollamaLocalModel represents a locally available Ollama model from /api/tags.
 type ollamaLocalModel struct {
-	Name  string `json:"name"`
-	Model string `json:"model"`
+	Name   string `json:"name"`
+	Model  string `json:"model"`
+	Digest string `json:"digest"`
+}
+
+// ollamaShowResponse represents the response from POST /api/show.
+type ollamaShowResponse struct {
+	Capabilities []string `json:"capabilities"`
+}
+
+// getModelCapabilities calls POST /api/show to retrieve the model's capabilities.
+func (o *Ollama) getModelCapabilities(ctx context.Context, modelName string) ([]string, error) {
+	body, err := json.Marshal(map[string]string{"model": modelName})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode /api/show request for %q: %w", modelName, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", o.endpoint("/api/show"), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create /api/show request for %q: %w", modelName, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := o.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query capabilities for %q: %w", modelName, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama /api/show returned status %d for %q", resp.StatusCode, modelName)
+	}
+	var showResp ollamaShowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&showResp); err != nil {
+		return nil, fmt.Errorf("failed to decode /api/show response for %q: %w", modelName, err)
+	}
+	if showResp.Capabilities == nil {
+		return nil, fmt.Errorf("ollama /api/show response for %q omitted capabilities", modelName)
+	}
+	return showResp.Capabilities, nil
+}
+
+func (o *Ollama) endpoint(path string) string {
+	return strings.TrimRight(o.ServerAddress, "/") + path
+}
+
+// modelCapabilitiesContext bounds metadata lookups independently from the
+// potentially longer generation timeout. A smaller configured timeout is honored.
+func (o *Ollama) modelCapabilitiesContext(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := time.Duration(o.Timeout) * time.Second
+	if timeout <= 0 || timeout > modelCapabilitiesTimeout {
+		timeout = modelCapabilitiesTimeout
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+// modelSupportsFromCapabilities derives ModelSupports from capabilities reported
+// by the Ollama /api/show endpoint.
+func modelSupportsFromCapabilities(caps []string) *ai.ModelSupports {
+	return &ai.ModelSupports{
+		Multiturn:  true,
+		SystemRole: true,
+		Tools:      slices.Contains(caps, "tools"),
+		// concatImages only forwards image parts; audio input is not supported.
+		Media: slices.Contains(caps, "vision"),
+	}
+}
+
+// modelSupportsFromStaticLists preserves the fallback used by explicitly
+// defined models when the server does not report capabilities.
+func modelSupportsFromStaticLists(modelName string) *ai.ModelSupports {
+	return &ai.ModelSupports{
+		Multiturn:  true,
+		SystemRole: true,
+		Tools:      slices.Contains(toolSupportedModels, modelName),
+		Media:      slices.Contains(mediaSupportedModels, modelName),
+	}
 }
 
 // listLocalModels calls GET /api/tags to list locally installed Ollama models.
 func (o *Ollama) listLocalModels(ctx context.Context) ([]ollamaLocalModel, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", o.ServerAddress+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", o.endpoint("/api/tags"), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -109,32 +190,38 @@ func (o *Ollama) listLocalModels(ctx context.Context) ([]ollamaLocalModel, error
 	return tagsResp.Models, nil
 }
 
+// DefineModel registers an Ollama model with g. A nil opts takes the
+// capabilities discovery has already found for the model, or the static
+// fallback when it has not been asked about.
 func (o *Ollama) DefineModel(g *genkit.Genkit, model ModelDefinition, opts *ai.ModelOptions) ai.Model {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if !o.initted {
 		panic("ollama.Init not called")
 	}
-	var modelOpts ai.ModelOptions
 
+	var modelOpts ai.ModelOptions
 	if opts != nil {
 		modelOpts = *opts
 	} else {
-		// Check if the model supports tools (must be a chat model and in the supported list)
-		supportsTools := model.Type == "chat" && slices.Contains(toolSupportedModels, model.Name)
+		// Explicitly registered models retain the static capability fallback used
+		// before dynamic discovery was added. Reuse successful discovery results
+		// when available without doing network I/O during registration.
+		supports := modelSupportsFromStaticLists(model.Name)
+		if cached, ok := o.cachedModelCapabilities(model.Name, ""); ok && cached.detected {
+			supports = cached.supportsCopy()
+		}
+		// Only chat models use /api/chat, which is the endpoint that accepts tools.
+		supports.Tools = model.Type == "chat" && supports.Tools
 		modelOpts = ai.ModelOptions{
-			Label: model.Name,
-			Supports: &ai.ModelSupports{
-				Multiturn:  true,
-				SystemRole: true,
-				Media:      slices.Contains(mediaSupportedModels, model.Name),
-				Tools:      supportsTools,
-			},
+			Label:    model.Name,
+			Supports: supports,
 			Versions: []string{},
 		}
 	}
+
 	meta := &ai.ModelOptions{
-		Label:        "Ollama - " + model.Name,
+		Label:        internal.ProviderLabel("Ollama", model.Name),
 		Supports:     modelOpts.Supports,
 		Versions:     []string{},
 		ConfigSchema: core.InferSchemaMap(GenerateContentConfig{}),
@@ -208,10 +295,12 @@ func (t *ThinkOption) IsEnabled() bool {
 	}
 }
 
+// MarshalJSON writes the option as the bool or string Ollama expects.
 func (t ThinkOption) MarshalJSON() ([]byte, error) {
 	return json.Marshal(t.value)
 }
 
+// UnmarshalJSON reads either the bool or the string form.
 func (t *ThinkOption) UnmarshalJSON(data []byte) error {
 	var b bool
 	if err := json.Unmarshal(data, &b); err == nil {
@@ -236,6 +325,9 @@ func (ThinkOption) JSONSchema() *jsonschema.Schema {
 	}
 }
 
+// GenerateContentConfig is the per-request configuration an Ollama model
+// accepts through [ai.WithConfig]. Every field is optional; an unset one takes
+// the model's own default.
 type GenerateContentConfig struct {
 	// Think controls thinking/reasoning mode.
 	// Use ThinkEnabled(true/false) for Ollama models, or
@@ -312,11 +404,29 @@ type Ollama struct {
 	ServerAddress string // Server address of oLLama.
 	Timeout       int    // Response timeout in seconds (defaulted to 30 seconds)
 
-	mu      sync.Mutex   // Mutex to control access.
+	mu      sync.Mutex   // Guards the plugin's own state below.
 	initted bool         // Whether the plugin has been initialized.
 	client  *http.Client // Shared HTTP client for API calls (e.g., /api/tags).
+
+	// The capabilities cache has its own lock: the discovery goroutines write
+	// to it while DefineModel reads it holding mu, so sharing one lock would
+	// mean dropping and retaking mu mid-function.
+	capMu             sync.Mutex
+	capabilitiesCache map[string]modelCapabilitiesCacheEntry
 }
 
+// modelCapabilitiesCacheEntry is one model's detected capabilities. A
+// successful detection is kept for the process's life, keyed by the digest
+// /api/tags reports so a re-pulled model is re-detected; a failure is kept only
+// briefly, so a server that was down is retried.
+type modelCapabilitiesCacheEntry struct {
+	digest   string
+	supports ai.ModelSupports
+	detected bool
+	expires  time.Time
+}
+
+// Name implements genkit.Plugin.
 func (o *Ollama) Name() string {
 	return provider
 }
@@ -338,14 +448,62 @@ func (o *Ollama) Init(ctx context.Context) []api.Action {
 		o.Timeout = 30
 	}
 	o.client = &http.Client{}
+	o.capabilitiesCache = make(map[string]modelCapabilitiesCacheEntry)
 	return []api.Action{}
+}
+
+// supportsCopy returns a copy of the entry's capabilities, so the model built
+// from it cannot reach the cache through the pointer.
+func (e modelCapabilitiesCacheEntry) supportsCopy() *ai.ModelSupports {
+	supports := e.supports
+	return &supports
+}
+
+func (o *Ollama) cachedModelCapabilities(name, digest string) (modelCapabilitiesCacheEntry, bool) {
+	key := normalizeModelName(name)
+	o.capMu.Lock()
+	defer o.capMu.Unlock()
+	entry, ok := o.capabilitiesCache[key]
+	if !ok || (digest != "" && entry.digest != digest) {
+		return modelCapabilitiesCacheEntry{}, false
+	}
+	if !entry.expires.IsZero() && time.Now().After(entry.expires) {
+		delete(o.capabilitiesCache, key)
+		return modelCapabilitiesCacheEntry{}, false
+	}
+	return entry, true
+}
+
+func (o *Ollama) cacheModelSupports(name, digest string, supports *ai.ModelSupports, detected bool) {
+	if supports == nil {
+		return
+	}
+	var expires time.Time
+	if !detected {
+		expires = time.Now().Add(capabilityFailureCacheLifetime)
+	}
+	key := normalizeModelName(name)
+	o.capMu.Lock()
+	defer o.capMu.Unlock()
+	if o.capabilitiesCache == nil {
+		o.capabilitiesCache = make(map[string]modelCapabilitiesCacheEntry)
+	}
+	o.capabilitiesCache[key] = modelCapabilitiesCacheEntry{
+		digest: digest, supports: *supports, detected: detected, expires: expires,
+	}
+}
+
+// normalizeModelName makes Ollama's implicit latest tag use the same cache key
+// as the explicit name returned by /api/tags.
+func normalizeModelName(name string) string {
+	return strings.TrimSuffix(name, ":latest")
 }
 
 // newModel creates an Ollama model without registering it in the Genkit registry.
 // It is used by ListActions (to generate ActionDesc) and ResolveAction (to return an Action).
 func (o *Ollama) newModel(name string, opts ai.ModelOptions) ai.Model {
 	meta := &ai.ModelOptions{
-		Label:        "Ollama - " + name,
+		Label:        internal.ProviderLabel("Ollama", name),
 		Supports:     opts.Supports,
 		Versions:     []string{},
 		ConfigSchema: core.InferSchemaMap(GenerateContentConfig{}),
@@ -362,18 +520,64 @@ func (o *Ollama) newModel(name string, opts ai.ModelOptions) ai.Model {
 func (o *Ollama) ListActions(ctx context.Context) []api.ActionDesc {
 	models, err := o.listLocalModels(ctx)
 	if err != nil {
-		slog.Error("unable to list ollama models", "error", err)
+		logger.Error(ctx, "unable to list ollama models", "error", err)
 		return nil
 	}
 
-	var actions []api.ActionDesc
+	filtered := make([]ollamaLocalModel, 0, len(models))
 	for _, m := range models {
-		name := m.Name
 		// Filter out embedding models (following JS: !m.model.includes('embed'))
-		if strings.Contains(name, "embed") {
+		if strings.Contains(m.Name, "embed") {
 			continue
 		}
-		model := o.newModel(name, ai.ModelOptions{Supports: &defaultOllamaSupports})
+		filtered = append(filtered, m)
+	}
+
+	supports := make([]*ai.ModelSupports, len(filtered))
+	var wg sync.WaitGroup
+	querySlots := make(chan struct{}, maxConcurrentCapabilityQueries)
+
+scheduleQueries:
+	for i, m := range filtered {
+		if cached, ok := o.cachedModelCapabilities(m.Name, m.Digest); ok {
+			supports[i] = cached.supportsCopy()
+			continue
+		}
+		select {
+		case querySlots <- struct{}{}:
+		case <-ctx.Done():
+			break scheduleQueries
+		}
+		wg.Add(1)
+		go func(i int, m ollamaLocalModel) {
+			defer wg.Done()
+			defer func() { <-querySlots }()
+			capabilityCtx, cancel := o.modelCapabilitiesContext(ctx)
+			defer cancel()
+			caps, err := o.getModelCapabilities(capabilityCtx, m.Name)
+			modelSupports := &defaultOllamaSupports
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn(ctx, "unable to detect ollama model capabilities", "model", m.Name, "error", err)
+				}
+			} else {
+				modelSupports = modelSupportsFromCapabilities(caps)
+			}
+			supports[i] = modelSupports
+			if ctx.Err() == nil {
+				o.cacheModelSupports(m.Name, m.Digest, modelSupports, err == nil)
+			}
+		}(i, m)
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		logger.Warn(ctx, "ollama model discovery canceled", "error", err)
+		return nil
+	}
+
+	actions := make([]api.ActionDesc, 0, len(filtered))
+	for i, m := range filtered {
+		model := o.newModel(m.Name, ai.ModelOptions{Supports: supports[i]})
 		if action, ok := model.(api.Action); ok {
 			actions = append(actions, action.Desc())
 		}
@@ -382,11 +586,15 @@ func (o *Ollama) ListActions(ctx context.Context) []api.ActionDesc {
 }
 
 // ResolveAction dynamically creates a model action on demand.
-func (o *Ollama) ResolveAction(atype api.ActionType, name string) api.Action {
+func (o *Ollama) ResolveAction(atype api.ActionType, id string) api.Action {
 	if atype != api.ActionTypeModel {
 		return nil
 	}
-	model := o.newModel(name, ai.ModelOptions{Supports: &defaultOllamaSupports})
+	supports := &defaultOllamaSupports
+	if cached, ok := o.cachedModelCapabilities(id, ""); ok {
+		supports = cached.supportsCopy()
+	}
+	model := o.newModel(id, ai.ModelOptions{Supports: supports})
 	if action, ok := model.(api.Action); ok {
 		return action
 	}

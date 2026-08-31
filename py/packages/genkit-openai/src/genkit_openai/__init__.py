@@ -50,6 +50,7 @@ See Also:
 """
 
 from .deepseek import DeepSeek, DeepSeekConfig, deepseek_model
+from .models.model_info import KnownGpt
 from .openai_plugin import OpenAI, openai_model
 from .typing import OpenAIConfig
 
@@ -60,6 +61,7 @@ def package_name() -> str:
 
 
 __all__ = [
+    'KnownGpt',
     'DeepSeek',
     'DeepSeekConfig',
     'OpenAI',
