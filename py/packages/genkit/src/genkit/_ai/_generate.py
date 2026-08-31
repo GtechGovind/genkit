@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable, Generator, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from typing_extensions import Never
 
 from genkit._ai._agents._session import get_current_session
@@ -36,6 +36,7 @@ from genkit._ai._model import (
     ModelRequest,
     ModelResponse,
     ModelResponseChunk,
+    resolve_model_name,
     text_from_content,
 )
 from genkit._ai._resource import ResourceArgument, ResourceInput, find_matching_resource, resolve_resources
@@ -47,7 +48,7 @@ from genkit._core._action import (
     ActionRunContext,
 )
 from genkit._core._error import GenkitError
-from genkit._core._logger import get_logger
+from genkit._core._logger import get_logger, is_debug_enabled
 from genkit._core._middleware import (
     BaseMiddleware,
     GenerateHookParams,
@@ -62,6 +63,7 @@ from genkit._core._middleware import (
 from genkit._core._model import (
     Document,
     GenerateActionOptions,
+    OutputConfig,
 )
 from genkit._core._protocols import RegistryLike, SessionLike
 from genkit._core._registry import Registry
@@ -391,24 +393,57 @@ def _augment_with_context(
 # parameters (e.g. "data:audio/L16;codec=pcm;rate=24000;base64,").
 _DATA_URI_RE = re.compile(r'data:[^,]{0,200},(?=.{100})', re.ASCII)
 
+# Longest string kept intact when serializing a response for debug logs.
+_MAX_LOGGED_STR_LEN = 8192
 
-def _redact_data_uris(obj: Any) -> Any:  # noqa: ANN401
-    """Recursively truncate long ``data:`` URIs in a serialized dict/list.
+# Tighter limit inside subtrees carrying the provider's own payload.
+_PROVIDER_STR_LEN = 1024
+_PROVIDER_FIELDS = frozenset({'custom', 'raw'})
 
-    Replaces values like ``data:image/png;base64,iVBORw0KGgo...`` with
-    ``data:image/png;base64,...<12345 bytes>`` so debug logs stay readable
-    when requests contain inline images or other binary media.
+# Most list items kept when serializing a response for debug logs.
+_MAX_LOGGED_LIST_LEN = 100
+
+
+def _redact_large_values(obj: Any, limit: int = _MAX_LOGGED_STR_LEN) -> Any:  # noqa: ANN401
+    """Recursively shrink oversized values in a serialized dict/list.
+
+    Data URIs keep their media type and drop the payload
+    (``data:image/png;base64,...<12345 chars>``); other over-long strings keep
+    their leading characters; binary values collapse to their size; over-long
+    lists keep their leading items. ``custom`` and ``raw`` subtrees use
+    ``_PROVIDER_STR_LEN`` so a provider blob costs less than model output.
+
+    Args:
+        obj: Value from a ``model_dump()``, walked recursively.
+        limit: Longest string kept intact within this subtree.
+
+    Returns:
+        The value with oversized leaves replaced by a truncated form that
+        reports how much was dropped.
     """
     if isinstance(obj, str):
         m = _DATA_URI_RE.match(obj)
         if m:
-            return f'{m.group()}...<{len(obj) - m.end()} bytes>'
+            return f'{m.group()}...<{len(obj) - m.end()} chars>'
+        if len(obj) > limit:
+            return f'{obj[:limit]}...<{len(obj) - limit} chars>'
         return obj
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return f'<{len(obj)} bytes>'
     if isinstance(obj, dict):
-        return {k: _redact_data_uris(v) for k, v in obj.items()}
+        return {
+            k: _redact_large_values(v, _PROVIDER_STR_LEN if k in _PROVIDER_FIELDS else limit) for k, v in obj.items()
+        }
     if isinstance(obj, list):
-        return [_redact_data_uris(v) for v in obj]
+        head = [_redact_large_values(v, limit) for v in obj[:_MAX_LOGGED_LIST_LEN]]
+        dropped = len(obj) - len(head)
+        return [*head, f'...<{dropped} more items>'] if dropped else head
     return obj
+
+
+def _loggable_response(response: ModelResponse) -> dict[str, Any]:
+    """Serialize a response for debug logging with oversized values shrunk."""
+    return _redact_large_values(response.model_dump())
 
 
 def raise_if_aborted(abort_signal: asyncio.Event) -> None:
@@ -764,10 +799,8 @@ async def _generate_action_turn(
         if schema_type:
             response._schema_type = schema_type
 
-        logger.debug(
-            'generate response',
-            response=_redact_data_uris(response.model_dump()),
-        )
+        if is_debug_enabled(logger):
+            logger.debug('generate response', response=_loggable_response(response))
 
         response.assert_valid()
         generated_msg = response.message
@@ -1073,17 +1106,17 @@ async def resolve_parameters(
     registry: Registry, request: GenerateActionOptions
 ) -> tuple[Action, list[Action], FormatDef | None]:
     """Resolve model, tools, and format from registry for a generation request."""
-    model = (
-        request.model
-        if request.model is not None
-        else cast(str | None, registry.lookup_value('defaultModel', 'defaultModel'))
-    )
-    if not model:
-        raise Exception('No model configured.')
+    model = resolve_model_name(model=request.model, registry=registry)
 
     model_action = await registry.resolve_model(model)
     if model_action is None:
-        raise Exception(f'Failed to to resolve model {model}')
+        message = f"Failed to resolve model '{model}'."
+        if isinstance(model, str) and '/' not in model:
+            message += " Ensure the model name includes the plugin namespace (e.g., 'plugin/model')."
+        raise GenkitError(
+            status='NOT_FOUND',
+            message=message,
+        )
 
     # Resolve tools up front to fail fast on invalid caller-supplied tool names or
     # duplicate short names before running side effects or middleware.
@@ -1100,7 +1133,7 @@ async def resolve_parameters(
 
 
 async def action_to_generate_request(
-    options: GenerateActionOptions, resolved_tools: list[Action], _model: Action
+    options: GenerateActionOptions, resolved_tools: list[Action], model: Action
 ) -> ModelRequest[Any]:
     """Convert GenerateActionOptions to a ModelRequest with tool definitions."""
     # TODO(#4340): add warning when tools are not supported in ModelInfo
@@ -1111,18 +1144,34 @@ async def action_to_generate_request(
     out_schema = output.json_schema if output else None
     if out_schema is not None and hasattr(out_schema, 'model_dump'):
         out_schema = out_schema.model_dump()
-    return ModelRequest(
+    request_kwargs: dict[str, Any] = dict(
         # Field validators auto-wrap MessageData -> Message and DocumentData -> Document
-        messages=options.messages,  # type: ignore[arg-type]
-        config=options.config if options.config is not None else {},  # type: ignore[arg-type]
-        docs=options.docs if options.docs else None,  # type: ignore[arg-type]
+        messages=options.messages,
+        config=options.config if options.config is not None else {},
+        docs=options.docs if options.docs else None,
         tools=tool_defs,
         tool_choice=options.tool_choice,
-        output_format=output.format if output else None,
-        output_schema=out_schema,
-        output_constrained=output.constrained if output else None,
-        output_content_type=output.content_type if output else None,
+        output=OutputConfig(
+            format=output.format if output else None,
+            # pyrefly: ignore[unexpected-keyword] - populate_by_name accepts the field name
+            json_schema=out_schema,
+            constrained=output.constrained if output else None,
+            content_type=output.content_type if output else None,
+        ),
     )
+    input_class = model.input_class
+    if input_class is not None and issubclass(input_class, ModelRequest) and input_class is not ModelRequest:
+        try:
+            # Fast path: construct the action's exact input class so validation
+            # happens once, here; _validate_input then passes it through as-is.
+            return input_class(**request_kwargs)
+        except ValidationError:
+            # Invalid input for the typed class. Fall through to the bare
+            # carrier so Action._validate_input re-discovers the failure and
+            # raises the proper GenkitError(INVALID_ARGUMENT) with the action
+            # name — the pre-fast-path error contract, preserved exactly.
+            pass
+    return ModelRequest(**request_kwargs)
 
 
 def to_tool_definition(tool: Action) -> ToolDefinition:

@@ -23,13 +23,14 @@ from typing import Any, Literal
 from openai import AsyncOpenAI
 from pydantic import ConfigDict, Field
 
-from genkit import ModelConfig, ModelInfo, ModelRequest, ModelResponse, Supports
+from genkit import ModelInfo, ModelRequest, ModelResponse, Supports
 from genkit.model import model_action_metadata
 from genkit.plugin_api import (
     Action,
     ActionKind,
     ActionMetadata,
     ActionRunContext,
+    ModelConfig,
     Plugin,
     loop_local_client,
     to_json_schema,

@@ -49,6 +49,7 @@ See Also:
     - OpenAI documentation: https://platform.openai.com/docs/
 """
 
+from .models.model_info import KnownGpt
 from .openai_plugin import OpenAI, openai_model
 from .typing import OpenAIConfig
 from .xai import XAI, XAIConfig, XAIImageConfig, xai_model
@@ -60,6 +61,7 @@ def package_name() -> str:
 
 
 __all__ = [
+    'KnownGpt',
     'OpenAI',
     'OpenAIConfig',
     'XAI',

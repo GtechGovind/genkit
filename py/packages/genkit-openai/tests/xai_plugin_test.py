@@ -22,8 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from genkit import MediaPart, Message, ModelConfig, ModelRequest, Part, Role, TextPart
-from genkit.plugin_api import ActionKind
+from genkit import MediaPart, Message, ModelRequest, Part, Role, TextPart
+from genkit.plugin_api import ActionKind, ModelConfig
 
 
 def _xai_module() -> ModuleType:

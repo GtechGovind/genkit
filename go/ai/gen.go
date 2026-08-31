@@ -18,6 +18,10 @@
 
 package ai
 
+import (
+	"github.com/firebase/genkit/go/core/status"
+)
+
 type ActionMetadata struct {
 	ActionType  string `json:"actionType,omitempty"`
 	Description string `json:"description,omitempty"`
@@ -78,6 +82,8 @@ const (
 	FinishReasonStop        FinishReason = "stop"
 	FinishReasonLength      FinishReason = "length"
 	FinishReasonBlocked     FinishReason = "blocked"
+	FinishReasonAborted     FinishReason = "aborted"
+	FinishReasonFailed      FinishReason = "failed"
 	FinishReasonInterrupted FinishReason = "interrupted"
 	FinishReasonOther       FinishReason = "other"
 	FinishReasonUnknown     FinishReason = "unknown"
@@ -90,11 +96,11 @@ type GenerateActionOptions struct {
 	// Docs provides retrieved documents to be used as context for this generation.
 	Docs []*Document `json:"docs,omitempty"`
 	// MaxTurns is the maximum number of tool call iterations that can be performed
-	// in a single generate call. Defaults to 5.
+	// in a single generate call. Defaults to 50 in Go; other runtimes set their own.
 	MaxTurns int `json:"maxTurns,omitempty"`
 	// Messages contains the conversation history for multi-turn prompting when supported.
 	Messages []*Message `json:"messages,omitempty"`
-	// Model is a model name (e.g., "vertexai/gemini-1.0-pro").
+	// Model is a model name (e.g., "vertexai/gemini-flash-latest").
 	Model string `json:"model,omitempty"`
 	// Output specifies the desired output format. Defaults to the model's default if unspecified.
 	Output    *GenerateActionOutputConfig `json:"output,omitempty"`
@@ -165,7 +171,7 @@ type GenerationCommonConfig struct {
 	// TopP (nucleus sampling) limits sampling to tokens whose cumulative probability exceeds P.
 	TopP float64 `json:"topP,omitempty"`
 	// Version specifies a particular version of a model family,
-	// e.g., "gemini-1.0-pro-001" for the "gemini-1.0-pro" family.
+	// e.g., "gemini-3.5-flash-001" for the "gemini-3.5-flash" family.
 	Version string `json:"version,omitempty"`
 }
 
@@ -333,6 +339,13 @@ type ModelRequest struct {
 type ModelResponse struct {
 	// Custom contains model-specific extra information. Deprecated: use Raw instead.
 	Custom any `json:"custom,omitempty"`
+	// Error is the structured failure information for a response that
+	// accompanies an error, set whenever FinishReason is [FinishReasonFailed] or
+	// [FinishReasonAborted]. It is the classified form of FinishMessage, so a
+	// caller reading a response that travelled as data (a trace, a persisted
+	// turn) branches on the status rather than matching a string. Nil on a
+	// response that carries no failure.
+	Error *status.Error `json:"error,omitempty"`
 	// FinishMessage provides additional details about why generation finished.
 	FinishMessage string `json:"finishMessage,omitempty"`
 	// FinishReason indicates why generation stopped (e.g., stop, length, blocked).
@@ -444,7 +457,7 @@ type reasoningPart struct {
 	// Metadata contains arbitrary key-value data for this part.
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// Reasoning contains the reasoning text of the message.
-	Reasoning string `json:"reasoning,omitempty"`
+	Reasoning string `json:"reasoning"`
 }
 
 // RerankerRequest represents a request to rerank documents based on relevance.

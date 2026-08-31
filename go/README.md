@@ -16,6 +16,8 @@
 
 <p align="center">
   Build production-ready AI-powered applications in Go with a unified interface for text generation, structured output, tool calling, and agentic workflows.
+  <br><br>
+  One interface over Google AI and Vertex AI (Gemini), Anthropic (Claude), OpenAI (GPT), xAI (Grok), DeepSeek, DashScope (Qwen), Moonshot (Kimi), Z.ai (GLM), Vertex AI Model Garden (Llama, Mistral), Ollama for local models, and any OpenAI-compatible endpoint.
 </p>
 
 <p align="center">
@@ -67,6 +69,99 @@ func main() {
 export GEMINI_API_KEY="your-api-key"
 go run main.go
 ```
+
+---
+
+## Samples
+
+Every sample below runs on its own with `go run .`, and its package comment explains what it demonstrates and how to call it. The `basic-*` set is the canonical one: together it covers the whole framework, and each program is small enough to read in one sitting.
+
+| Sample | Description |
+|--------|-------------|
+| [basic](samples/basic/main.go) | Simple text generation with streaming |
+| [basic‑structured](samples/basic-structured/main.go) | Typed JSON output with `GenerateData` and `GenerateDataStream` |
+| [basic‑formats](samples/basic-formats/main.go) | Output formats and what each one makes a streamed chunk mean |
+| [basic‑media](samples/basic-media) | Reading, drawing, and redrawing pictures, plus generating video with a polled background model |
+| [basic‑prompts](samples/basic-prompts) | Prompt templates with Handlebars and `.prompt` files, shared partials and helpers, and prompts embedded in the binary |
+| [basic‑prompt‑content](samples/basic-prompt-content/main.go) | Prompt content computed from your data, with media and retrieved docs |
+| [basic‑tools](samples/basic-tools/main.go) | A slow tool whose answer is more than one value, returned as a multipart response |
+| [basic‑tools‑exp](samples/basic-tools-exp/main.go) | The same program on the in-preview tools API, so the diff between the two is the API |
+| [basic‑agents](samples/basic-agents) | Multi-turn agents (inline, prompt-file, and custom-loop) with snapshots and background detach |
+| [basic‑agents‑server](samples/basic-agents-server/main.go) | Serving store-backed and stateless agents over HTTP |
+| [basic‑tool‑interrupts](samples/basic-tool-interrupts/main.go) | Human in the loop (HITL): a tool that pauses for approval and resumes with the answer |
+| [basic‑tool‑interrupts‑exp](samples/basic-tool-interrupts-exp/main.go) | The same HITL program on the in-preview tools API, so the diff between the two is the API |
+| [basic‑middleware](samples/basic-middleware) | Model middleware, one program each: [retry-fallback](samples/basic-middleware/retry-fallback/main.go) composes `Retry` and `Fallback` into a cascade that survives a dead model, [filesystem](samples/basic-middleware/filesystem) gives the model file access scoped to a single directory, and [skills](samples/basic-middleware/skills) loads `SKILL.md` personas on demand |
+| [basic‑errors](samples/basic-errors/main.go) | Classifying failures with sentinels and recovering with `errors.Is` |
+| [basic‑durable‑streaming‑exp](samples/basic-durable-streaming-exp/main.go) | Reconnectable streams with replay, on the in-preview `core/x/streaming` API |
+
+---
+
+<details>
+<summary><strong>Contents</strong> &middot; everything Genkit Go can do, at a glance</summary>
+
+**[Agents](#agents)** *(preview)*
+
+Multi-turn conversations that own their own loop and state.
+
+[Define an Agent](#define-an-agent) &middot;
+[Multi-Turn Conversations](#multi-turn-conversations) &middot;
+[Load the Prompt from a File](#load-the-prompt-from-a-file) &middot;
+[Custom Turn Loops](#custom-turn-loops) &middot;
+[Persist and Resume](#persist-and-resume) &middot;
+[Re-attempt Failed Turns](#re-attempt-failed-turns) &middot;
+[Stop a Run and Continue It](#stop-a-run-and-continue-it) &middot;
+[Redact on the Way Out](#redact-on-the-way-out) &middot;
+[Background Agents](#background-agents) &middot;
+[Delegate to Sub-Agents](#delegate-to-sub-agents) &middot;
+[Serve Agents over HTTP](#serve-agents-over-http)
+
+**[Features](#features)**
+
+**Generating**
+[Generate Text](#generate-text) &middot;
+[Generate Structured Data](#generate-structured-data) &middot;
+[Stream Responses](#stream-responses) &middot;
+[Stream Structured Data](#stream-structured-data)
+
+**Tools**
+[Define Tools](#define-tools) &middot;
+[Tool Interrupts](#tool-interrupts) &middot;
+[Streaming, Multipart, and Interruptible Tools](#streaming-multipart-and-interruptible-tools) *(preview)*
+
+**Middleware**
+[Middleware](#middleware) &middot;
+[Custom Middleware](#custom-middleware)
+
+**Flows**
+[Define Flows](#define-flows) &middot;
+[Streaming Flows](#streaming-flows) &middot;
+[Traced Sub-steps](#traced-sub-steps) &middot;
+[Logging](#logging)
+
+**Prompts**
+[Define Prompts](#define-prompts) &middot;
+[Type-Safe Data Prompts](#type-safe-data-prompts) &middot;
+[Build Prompts from Your Data](#build-prompts-from-your-data) &middot;
+[Load Prompts from Files](#load-prompts-from-files) &middot;
+[Embed Prompts in Your Binary](#embed-prompts-in-your-binary)
+
+**Serving**
+[Expose Flows as HTTP Endpoints](#expose-flows-as-http-endpoints) &middot;
+[Works with Any HTTP Framework](#works-with-any-http-framework) &middot;
+[Frameworks with Centralized Error Handling](#frameworks-with-centralized-error-handling) &middot;
+[Error Handling](#error-handling) &middot;
+[Durable Streaming](#durable-streaming) *(preview)*
+
+**[Model Providers](#model-providers)**
+
+Gemini, Claude, GPT, Grok, DeepSeek, Qwen, Kimi, GLM, Llama, Mistral, local models, and anything OpenAI-compatible.
+
+**[Development Tools](#development-tools)**
+
+[Genkit CLI](#genkit-cli) &middot;
+[Developer UI](#developer-ui)
+
+</details>
 
 ---
 
@@ -160,6 +255,11 @@ input:
 ---
 {{role "system"}}
 You are {{personality}}. Keep responses concise.
+
+{{history}}
+
+{{role "user"}}
+If the question is ambiguous, ask one clarifying question instead of guessing.
 ```
 
 ```go
@@ -242,7 +342,7 @@ chatAgent := genkitx.DefineCustomAgent(g, "chat",
 
 ### Persist and Resume
 
-With a session store configured, every successful turn writes a snapshot. The caller only needs the `SessionID` from a previous result to pick the conversation back up:
+With a session store configured, each turn writes a snapshot as it ends. The caller only needs the `SessionID` from a previous result to pick the conversation back up:
 
 ```go
 first, _ := chatAgent.RunText(ctx, "My name is Alex and I'm planning a trip to Japan.")
@@ -256,6 +356,42 @@ fmt.Println(second.Message.Text()) // "Your name is Alex."
 Resume from one specific point in history with `aix.WithSnapshotID`, or skip the server store entirely and round-trip the state yourself with `aix.WithState` (the conversation's identity travels inside the state object).
 
 [See full example](samples/basic-agents)
+
+### Re-attempt Failed Turns
+
+A turn that fails keeps the tool rounds it completed. The generate call hands back the conversation as it stood at the last turn seam, the agent commits that, and it persists as a `failed` snapshot carrying the error. Resume that snapshot like any other and send an input with no payload: the turn runs again on the committed messages, so the tool calls that already succeeded are not repeated.
+
+```go
+out, _ := agent.RunText(ctx, "Book the full itinerary.")
+if out.FinishReason == aix.AgentFinishReasonFailed {
+    // out.Error carries the status. Retry the transient ones.
+    if out.Error.Status == status.Unavailable {
+        retried, _ := agent.Run(ctx, &aix.AgentInput{},
+            aix.WithSessionID[any](out.SessionID))
+    }
+}
+```
+
+Whether a failure is worth another attempt is yours to decide; the framework records the error and leaves the snapshot resumable either way. A new message works there too, and rewinding past the failure is a resume from the previous snapshot ID.
+
+Without a store, the failed output's `State` carries the same resume point inline; initialize the next invocation with it. A turn rejected before it reached the model (an invalid input, for example) commits nothing, and the resume point stays the turn before it. Custom agents opt in by returning a `TurnResult` alongside the turn's error; a bare error keeps the discard-the-turn behavior.
+
+### Stop a Run and Continue It
+
+A run the caller stopped is `aborted`; a run that broke is `failed`. Stopping covers every way the caller ends it: cancelling the context on a live connection, closing the transport, letting a deadline expire, hitting a limit it set such as `ai.WithMaxTurns`, or calling `Abort` on a detached one. All of them land an `aborted` snapshot holding the turns that finished, and all of them resume like a `failed` one:
+
+```go
+ctx, cancel := context.WithCancel(ctx)
+out, err := chatAgent.Run(ctx, &aix.AgentInput{Message: msg})  // cancel() elsewhere
+
+// Both come back: err is what stopped the run, out names where it stopped.
+if out.FinishReason == aix.AgentFinishReasonAborted {
+    resumed, _ := chatAgent.Run(context.Background(), &aix.AgentInput{},
+        aix.WithSnapshotID[any](out.SnapshotID))
+}
+```
+
+The turn that was in flight is discarded whole, so the conversation ends at a turn seam. A tool that had already run inside it loses its response along with the rest of the round, and re-sending the conversation calls it again.
 
 ### Redact on the Way Out
 
@@ -290,10 +426,12 @@ snap, _ := chatAgent.GetSnapshot(ctx, snapshotID)
 switch snap.Status {
 case aix.SnapshotStatusPending:   // still working
 case aix.SnapshotStatusCompleted: // snap.State holds the final state; resume it
-case aix.SnapshotStatusFailed:    // snap.Error holds the structured failure
+case aix.SnapshotStatusFailed:    // snap.Error holds the failure; still resumable
+case aix.SnapshotStatusAborted:   // stopped early; resumable from the last finished turn
 }
 
 // Or stop it early; the runtime observes the abort and cancels the work.
+// The snapshot keeps the turns that finished, so it can be resumed later.
 chatAgent.Abort(ctx, snapshotID)
 ```
 
@@ -371,7 +509,7 @@ log.Fatal(server.Start(ctx, "127.0.0.1:8080", mux))
 
 A client starts a conversation by POSTing a turn, then continues it by sending the returned `sessionId` in the request's `init` field. Agents with no store return the full state instead and the client round-trips it, so stateless and store-backed agents deploy side by side.
 
-[See full example](samples/basic-agents-server)
+[See full example](samples/basic-agents-server/main.go)
 
 ---
 
@@ -391,6 +529,40 @@ text, _ := genkit.GenerateText(ctx, g,
 fmt.Println(text)
 ```
 
+Options compose, so you can build a request up from several helpers. Options
+carrying multiple items (`ai.WithMessages`, `ai.WithTools`, `ai.WithDocs`,
+`ai.WithUse`) accumulate across repeats, while single-value options
+(`ai.WithConfig`, `ai.WithModelName`, `ai.WithSystem`) take the last one set.
+Repeating an option is how a request gets assembled in pieces, not a mistake to
+be reported:
+
+```go
+opts := []ai.GenerateOption{
+    ai.WithModelName("googleai/gemini-flash-latest"),
+    ai.WithSystem("You are a helpful assistant."),
+    ai.WithTools(searchTool, weatherTool),
+}
+
+if isAdmin {
+    // Appends to the tools above; the model sees all of them.
+    opts = append(opts, ai.WithTools(adminTools...))
+}
+if terse {
+    // Fills the same slot as the system prompt above, so this one wins.
+    opts = append(opts, ai.WithSystem("You are a terse assistant. One sentence."))
+}
+
+response, _ := genkit.Generate(ctx, g, append(opts, ai.WithPrompt("What should I pack for Tokyo?"))...)
+```
+
+What still fails is a combination no merge could make sense of, rather than a
+repeat. Tool names must be unique across the merged list, so the same tool from
+two helpers is rejected when the request runs, and `genkit.DefinePrompt` panics
+if given a conversation template alongside separately supplied messages, since
+the template already is the conversation. These rules cover a single options
+list; APIs that layer two lists, like a prompt's define-time options against
+`Execute`-time options, document their own precedence.
+
 ### Generate Structured Data
 
 Get type-safe JSON output that maps directly to your Go structs:
@@ -409,7 +581,7 @@ recipe, _ := genkit.GenerateData[Recipe](ctx, g,
 fmt.Printf("Recipe: %s\n", recipe.Title)
 ```
 
-[See full example](samples/basic-structured)
+[See full example](samples/basic-structured/main.go)
 
 ### Stream Responses
 
@@ -432,7 +604,14 @@ for result, err := range stream {
 }
 ```
 
-[See full example](samples/basic-structured)
+Both forms are supported, and the choice is about how much of the stream you need
+to see. `ai.WithStreaming` takes a callback and still returns the finished
+response, so it stays shorter whenever forwarding the text is all you do.
+`GenerateStream` hands you the loop instead, which is what you want to inspect
+individual parts, recover from a failure part-way through, or act on the chunks
+before passing them on.
+
+[See full example](samples/basic-tools/main.go)
 
 ### Stream Structured Data
 
@@ -445,11 +624,13 @@ type Ingredient struct {
 }
 
 type Recipe struct {
-    Title       string        `json:"title"`
-    Ingredients []*Ingredient `json:"ingredients"`
+    Title       string       `json:"title"`
+    Ingredients []Ingredient `json:"ingredients"`
 }
 
-stream := genkit.GenerateDataStream[*Recipe](ctx, g,
+// Asking for a value rather than a pointer means a chunk is always usable:
+// the zero Recipe reads the same as one whose fields have not arrived yet.
+stream := genkit.GenerateDataStream[Recipe](ctx, g,
     ai.WithModelName("googleai/gemini-flash-latest"),
     ai.WithPrompt("Create a recipe for spaghetti carbonara."),
 )
@@ -463,13 +644,19 @@ for result, err := range stream {
         break
     }
     // Access partial data as it streams in
-    if result.Chunk != nil && len(result.Chunk.Ingredients) > 0 {
+    if len(result.Chunk.Ingredients) > 0 {
         fmt.Printf("Found ingredient: %s\n", result.Chunk.Ingredients[0].Name)
     }
 }
 ```
 
-[See full example](samples/basic-structured)
+[See full example](samples/basic-structured/main.go)
+
+The output format decides how the text is parsed and what a chunk holds: the default `json` gives a growing value like the one above, while `ai.WithOutputFormat(ai.OutputFormatJSONL)` on a slice type hands over one item at a time instead of restating the whole list, and `ai.WithOutputEnums` constrains the answer to one label.
+
+Streaming a flow over HTTP needs `?stream=true` on the URL or an `Accept: text/event-stream` header; without one the flow returns only its final result.
+
+[See full example](samples/basic-formats/main.go)
 
 ### Define Tools
 
@@ -496,11 +683,27 @@ response, _ := genkit.Generate(ctx, g,
 fmt.Println(response.Text())
 ```
 
-[See full example](samples/basic)
+A tool error fails the whole generation rather than being reported to the model, so a miss the model could work around (no such city, no rows matched) belongs in the result rather than in an `error`.
+
+`genkit.DefineMultipartTool` is for a result that is more than one value. It returns an `ai.MultipartToolResponse` instead: `Output` is what a plain tool would have returned, and `Content` carries parts that are not values, such as an image or a document. Those parts reach the model and the client both, and must be media or data parts.
+
+```go
+chartTool := genkit.DefineMultipartTool(g, "chartWeather",
+    "Charts a location's temperatures for the last week",
+    func(ctx *ai.ToolContext, input WeatherInput) (*ai.MultipartToolResponse, error) {
+        return &ai.MultipartToolResponse{
+            Output:  Trend{Low: 61, High: 78},
+            Content: []*ai.Part{ai.NewMediaPart("image/png", chartDataURI)},
+        }, nil
+    },
+)
+```
+
+[See full example](samples/basic-tools/main.go)
 
 ### Tool Interrupts
 
-Pause execution for human approval, then resume with modified inputs or direct responses:
+Interrupts are how Genkit does human in the loop (HITL). A tool pauses execution for a person's approval, and the flow resumes it with modified inputs or a direct response:
 
 ```go
 type TransferInput struct {
@@ -525,6 +728,10 @@ transferTool := genkit.DefineTool(g, "transfer",
                 Balance: currentBalance,
             })
         }
+        // The answer travels as metadata, so it is read back a key at a time.
+        if approved, ok := ai.ResumedValue[bool](ctx, "approved"); ok && !approved {
+            return "Transfer declined", nil
+        }
         return "Transfer completed", nil
     },
 )
@@ -536,22 +743,30 @@ resp, _ := genkit.Generate(ctx, g,
     ai.WithTools(transferTool),
 )
 
-if resp.FinishReason == ai.FinishReasonInterrupted {
-    for _, interrupt := range resp.Interrupts() {
-        meta, _ := ai.InterruptAs[TransferInterrupt](interrupt)
+// Interrupts() yields nothing unless the tool paused for input.
+var restarts []*ai.Part
+for _, interrupt := range resp.Interrupts() {
+    meta, _ := ai.InterruptAs[TransferInterrupt](interrupt)
 
-        // Get user confirmation, then resume
-        part, _ := transferTool.RestartWith(interrupt)
-        resp, _ = genkit.Generate(ctx, g,
-            ai.WithMessages(resp.History()...),
-            ai.WithTools(transferTool),
-            ai.WithToolRestarts(part),
-        )
-    }
+    // Use meta to get user confirmation, then resume with their answer.
+    approved := askAHuman(meta)
+    part, _ := transferTool.RestartWith(interrupt,
+        ai.WithResumedMetadata[TransferInput](map[string]any{"approved": approved}))
+    restarts = append(restarts, part)
+}
+
+// Collect every restart first, then resume once: generating inside the loop
+// would resume later interrupts against a history that already moved on.
+if len(restarts) > 0 {
+    resp, _ = genkit.Generate(ctx, g,
+        ai.WithMessages(resp.History()...),
+        ai.WithTools(transferTool),
+        ai.WithToolRestarts(restarts...),
+    )
 }
 ```
 
-[See full example](samples/intermediate-interrupts)
+[See full example](samples/basic-tool-interrupts/main.go)
 
 ### Streaming, Multipart, and Interruptible Tools
 
@@ -636,7 +851,9 @@ if len(restarts) > 0 {
 }
 ```
 
-[See the banker example](samples/basic-agents) for an interruptible tool wired into an agent.
+`tool.SendChunk` is the third helper: where `tool.SendPartial` wraps a value as a partial tool response, `SendChunk` hands the caller an `ai.ModelResponseChunk` the tool built itself, which is what to reach for when the update is a line of prose. Both are best-effort, so a tool that reports progress through them still works when the caller is not streaming, and neither is written to history.
+
+[See full example](samples/basic-tool-interrupts-exp/main.go), which is the HITL sample above rewritten against this API, or [the banker example](samples/basic-agents) for an interruptible tool wired into an agent.
 
 ### Middleware
 
@@ -658,7 +875,7 @@ response, _ := genkit.Generate(ctx, g,
     ai.WithUse(
         &middleware.Retry{MaxRetries: 3},
         &middleware.Fallback{Models: []ai.ModelRef{
-            googlegenai.ModelRef("googleai/gemini-2.5-flash", nil),
+            googlegenai.ModelRef("googleai/gemini-3.5-flash", nil),
         }},
     ),
 )
@@ -670,7 +887,7 @@ The `middleware` plugin also ships with:
 - [`Filesystem`](samples/basic-middleware/filesystem) — gives the model `list_files` and `read_file` tools (plus `write_file` and `edit_file` when `AllowWriteAccess` is set), all confined to a single `RootDir` via `os.Root` (Go 1.25+) so paths cannot escape via `..`, absolute paths, or symlinks.
 - [`Skills`](samples/basic-middleware/skills) — exposes a library of `SKILL.md` files through a `use_skill` tool so the model can pull in specialised instructions on demand.
 
-[See the retry + fallback sample](samples/basic-middleware/retry-fallback) for a full composition.
+[See the retry + fallback sample](samples/basic-middleware/retry-fallback/main.go) for a full composition.
 
 ### Custom Middleware
 
@@ -718,7 +935,7 @@ joke, _ := jokeFlow.Run(ctx, "programming")
 fmt.Println(joke)
 ```
 
-[See full example](samples/basic)
+[See full example](samples/basic/main.go)
 
 ### Streaming Flows
 
@@ -727,26 +944,18 @@ Stream data from your flows using Server-Sent Events (SSE):
 ```go
 genkit.DefineStreamingFlow(g, "streamStory",
     func(ctx context.Context, topic string, send core.StreamCallback[string]) (string, error) {
-        stream := genkit.GenerateStream(ctx, g,
+        return genkit.GenerateText(ctx, g,
             ai.WithModelName("googleai/gemini-flash-latest"),
             ai.WithPrompt("Write a story about %s", topic),
+            ai.WithStreaming(func(ctx context.Context, chunk *ai.ModelResponseChunk) error {
+                return send(ctx, chunk.Text())
+            }),
         )
-
-        for result, err := range stream {
-            if err != nil {
-                return "", err
-            }
-            if result.Done {
-                return result.Response.Text(), nil
-            }
-            send(ctx, result.Chunk.Text())
-        }
-        return "", nil
     },
 )
 ```
 
-[See full example](samples/basic)
+[See full example](samples/basic/main.go)
 
 ### Traced Sub-steps
 
@@ -775,7 +984,30 @@ genkit.DefineFlow(g, "processDocument",
 )
 ```
 
-[See full example](samples/basic)
+[See full example](samples/basic/main.go)
+
+### Logging
+
+Log through the context-aware logger (package `github.com/firebase/genkit/go/core/logger`) and records reach the terminal and, during development, the Dev UI attached to the trace span that emitted them:
+
+```go
+genkit.DefineFlow(g, "importDocuments",
+    func(ctx context.Context, source string) (int, error) {
+        logger.Info(ctx, "starting import", "source", source)
+
+        count, err := importAll(ctx, source)
+        if err != nil {
+            logger.Error(ctx, "import failed", "source", source, "error", err)
+            return 0, err
+        }
+
+        logger.Debug(ctx, "import finished", "documents", count)
+        return count, nil
+    },
+)
+```
+
+The terminal shows info and above by default; run with `GENKIT_LOG_LEVEL=debug` to also see Genkit's per-request detail (model calls, tool runs, span timings) there. The Dev UI always receives debug and above, so an interactive app can keep a quiet terminal while the full narrative lands in the trace viewer.
 
 ### Define Prompts
 
@@ -810,7 +1042,7 @@ type Joke struct {
     Punchline string `json:"punchline"`
 }
 
-jokePrompt := genkit.DefineDataPrompt[JokeRequest, *Joke](g, "joke",
+jokePrompt := genkit.DefineDataPrompt[JokeRequest, Joke](g, "joke",
     ai.WithModelName("googleai/gemini-flash-latest"),
     ai.WithPrompt("Tell a joke about {{topic}}."),
 )
@@ -824,13 +1056,51 @@ for result, err := range jokePrompt.ExecuteStream(ctx, JokeRequest{Topic: "cats"
         break
     }
     // Access typed partial data as it streams
-    if result.Chunk != nil && result.Chunk.Setup != "" {
+    if result.Chunk.Setup != "" {
         fmt.Printf("Got setup: %s\n", result.Chunk.Setup)
     }
 }
 ```
 
 [See full example](samples/basic-prompts)
+
+### Build Prompts from Your Data
+
+Fill any part of a prompt with a Go function instead of a template. The function receives your input type, and what it returns is sent as written, so text from a user or a database never has to be escaped:
+
+```go
+type Ticket struct {
+    Question   string `json:"question"`
+    Screenshot string `json:"screenshot,omitempty"` // data URI, optional
+}
+
+supportPrompt := genkit.DefinePrompt(g, "support",
+    ai.WithModelName("googleai/gemini-flash-latest"),
+    ai.WithInputType(Ticket{}),
+    ai.WithSystem("You are a support agent. Answer in two sentences."),
+
+    // Text plus an image, assembled per request.
+    ai.WithPromptPartsFn(func(ctx context.Context, t Ticket) ([]*ai.Part, error) {
+        parts := []*ai.Part{ai.NewTextPart(t.Question)}
+        if t.Screenshot != "" {
+            parts = append(parts, ai.NewMediaPart("image/png", t.Screenshot))
+        }
+        return parts, nil
+    }),
+)
+
+// The braces below reach the model as typed, not as a template.
+resp, _ := supportPrompt.Execute(ctx, ai.WithInput(Ticket{
+    Question:   "Why does my {{template}} not render?",
+    Screenshot: screenshotDataURI,
+}))
+```
+
+Every slot has a function form: `WithSystemFn` and `WithPromptFn` for the single-message slots (with `WithSystemPartsFn` and `WithPromptPartsFn` for multi-part content), `WithMessagesFn` for the conversation, and `WithDocsFn` to attach retrieved documents.
+
+Each of the two single-message slots holds one message, so its text, parts, and function forms are four ways to write the same thing and the last one set wins. Documents and conversation messages accumulate instead.
+
+[See full example](samples/basic-prompt-content/main.go)
 
 ### Load Prompts from Files
 
@@ -870,6 +1140,8 @@ recipe, _ := recipePrompt.Execute(ctx, RecipeRequest{
 fmt.Printf("%s (%s)\n", recipe.Title, recipe.PrepTime)
 ```
 
+`genkit.DefinePartial` registers a named block of template text to pull into any prompt with `{{> name}}`, and `genkit.DefineHelper` registers a Go function a template can call as `{{name arg}}`; both live on the Genkit instance, so code-defined prompts and `.prompt` files share the same ones.
+
 [See full example](samples/basic-prompts)
 
 ### Embed Prompts in Your Binary
@@ -887,13 +1159,13 @@ func main() {
         genkit.WithPromptFS(promptsFS),
     )
 
-    prompt := genkit.LookupPrompt(g, "greeting")
+    prompt := genkit.LookupPrompt(g, "joke")
     response, _ := prompt.Execute(ctx)
     fmt.Println(response.Text())
 }
 ```
 
-[See full example](samples/prompts-embed)
+[See full example](samples/basic-prompts)
 
 ### Expose Flows as HTTP Endpoints
 
@@ -992,6 +1264,18 @@ case errors.Is(err, status.ErrResourceExhausted):
 
 Models, tools, prompts, and provider APIs all report failures this way, so recovery logic reads as a switch rather than a string match.
 
+A generation failure keeps the progress the loop made: once the request has resolved, the classified error comes back alongside a partial `ai.ModelResponse`. When the loop stopped early, the response reports `ai.FinishReasonFailed` with the cause in `FinishMessage` if something broke (a failed model call, a failed tool), or `ai.FinishReasonAborted` if the caller stopped it: a cancelled context, an expired deadline, or a limit it set such as max turns. `History()` carries the conversation up to that point:
+
+```go
+resp, err := genkit.Generate(ctx, g /* ... */)
+if err != nil && resp != nil {
+    transcript := resp.History() // A conversation you can send again.
+    cause := resp.Error          // The same failure, classified.
+}
+```
+
+`resp.Error` is the structured form of `FinishMessage`, so a response that travelled as data (a trace, a persisted turn) still says why it stopped without anyone matching a string. That history stops at a turn seam: the completed tool rounds, and nothing from the turn that failed. A model message whose tools did not all answer is dropped along with the round it opened, because no provider accepts a conversation that ends in an unanswered tool request. Send the history back to retry the failed step without repeating the tool calls that already succeeded. Text streamed before the failure reached your callback, so watch the stream if you want to show it.
+
 Your own failures work the same way. Derive a subtype to keep a parent's status, and use `PublicErrorf` when the message is safe to return to a client:
 
 ```go
@@ -1010,7 +1294,7 @@ genkit.DefineFlow(g, "recipeFlow", func(ctx context.Context, dish string) (strin
 
 Wrapping with `fmt.Errorf` and `%w` preserves the classification, so context added up the stack costs you nothing. Served over HTTP, the status picks the response code and only `PublicErrorf` messages reach the client: everything else is redacted and logged server-side, so provider text and internal identifiers stay out of responses. Set `GENKIT_ENV=dev` to see them unredacted while developing.
 
-[See full example](samples/basic-errors)
+[See full example](samples/basic-errors/main.go)
 
 ### Durable Streaming
 
@@ -1031,7 +1315,7 @@ mux.HandleFunc("POST /myFlow", genkit.Handler(myStreamingFlow,
 
 Clients receive a stream ID in the `X-Genkit-Stream-Id` header and can reconnect to replay buffered chunks.
 
-[See full example](samples/durable-streaming)
+[See full example](samples/basic-durable-streaming-exp/main.go)
 
 ---
 
@@ -1042,10 +1326,11 @@ Genkit provides a unified interface across all major AI providers. Use whichever
 | Provider | Plugin | Models |
 |----------|--------|--------|
 | **Google AI** | `googlegenai.GoogleAI` | Gemini 3.5 Flash, Gemini 3.1 Pro, and more |
-| **Vertex AI** | `vertexai.VertexAI` | Gemini 3.5 Flash, Gemini 3.1 Pro via Google Cloud |
-| **Anthropic** | `anthropic.Anthropic` | Claude Opus 4.8, Claude Sonnet 4.6, Claude Haiku 4.5 |
+| **Vertex AI** | `googlegenai.VertexAI` | Gemini 3.5 Flash, Gemini 3.1 Pro via Google Cloud |
+| **Anthropic** | `anthropic.Anthropic` | Claude Opus 5, Claude Sonnet 5, Claude Fable 5, Claude Haiku 4.5 |
+| **Vertex AI Model Garden** | `modelgarden.Anthropic`, `.Llama`, `.Mistral` | Claude, Llama, and Mistral via Google Cloud |
 | **Ollama** | `ollama.Ollama` | Llama 4, Qwen 3, DeepSeek, and other local models |
-| **OpenAI Compatible** | `compat_oai` | GPT-5.5, and any OpenAI-compatible API |
+| **OpenAI Compatible** | `compat_oai` | GPT-5.6, Grok, DeepSeek, Qwen, Kimi, GLM, the OpenRouter gateway, and any OpenAI-compatible API |
 
 ```go
 // Google AI
@@ -1109,26 +1394,6 @@ The local developer UI lets you:
 - **Inspect traces** to debug complex multi-step operations
 - **Compare models** by switching providers in real-time
 - **Evaluate prompts** against datasets
-
----
-
-## Samples
-
-Explore working examples to see Genkit in action:
-
-| Sample | Description |
-|--------|-------------|
-| [basic](samples/basic) | Simple text generation with streaming |
-| [basic-structured](samples/basic-structured) | Typed JSON output with `GenerateData` and `GenerateDataStream` |
-| [basic-prompts](samples/basic-prompts) | Prompt templates with Handlebars and `.prompt` files |
-| [basic-agents](samples/basic-agents) | Multi-turn agents (inline, prompt-file, and custom-loop) with snapshots and background detach |
-| [basic-agents-server](samples/basic-agents-server) | Serving store-backed and stateless agents over HTTP |
-| [intermediate-interrupts](samples/intermediate-interrupts) | Human-in-the-loop with tool interrupts |
-| [basic-middleware/retry-fallback](samples/basic-middleware/retry-fallback) | Composing `Retry` and `Fallback` middleware |
-| [basic-middleware/filesystem](samples/basic-middleware/filesystem) | Scoped filesystem tools for the model |
-| [basic-middleware/skills](samples/basic-middleware/skills) | On-demand loadable `SKILL.md` personas |
-| [prompts-embed](samples/prompts-embed) | Embed prompts in your binary |
-| [durable-streaming](samples/durable-streaming) | Reconnectable streams with replay |
 
 ---
 

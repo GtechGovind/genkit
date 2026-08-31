@@ -50,6 +50,7 @@ from genkit._core._constants import GENKIT_VERSION
 from genkit._core._error import ReflectionError, ReflectionErrorDetails, StatusCodes, get_reflection_json
 from genkit._core._logger import get_logger
 from genkit._core._middleware import GenerateMiddleware
+from genkit._core._model import ModelRef
 from genkit._core._reflection import as_agent_input_dict, resolve_agent_init
 from genkit._core._registry import Registry
 from genkit._core._trace._default_exporter import TraceServerExporter
@@ -363,8 +364,9 @@ class ReflectionServerV2:
                     )
                 else:
                     logger.debug('reflection V2: unknown notification', method=method)
-        except Exception:
-            logger.exception('reflection V2: handler error', method=method)
+        except Exception as e:
+            logger.error(f'Reflection error in {method}: {type(e).__name__}: {e}')
+            logger.debug('reflection V2: handler error', method=method, exc_info=e)
             if req_id is not None:
                 await self.send_error(str(req_id), JSON_RPC_SERVER_ERROR, 'internal error')
 
@@ -490,7 +492,8 @@ class ReflectionServerV2:
             await self.send_error(sid, JSON_RPC_SERVER_ERROR, 'Action was cancelled', err_data)
             return
 
-        logger.exception('reflection V2: runAction error')
+        # Dev UI already shows the error + stack from the JSON-RPC response.
+        logger.debug('Action failed: %s: %s', type(exc).__name__, exc, exc_info=True)
         # Wire contract requires ``details`` to carry only ``stack`` and ``traceId``
         # (see ``GenkitErrorSchema.data.genkitErrorDetails`` in genkit-tools); anything
         # else in ``GenkitError.details`` is runtime-internal and gets dropped.
@@ -707,7 +710,9 @@ class ReflectionServerV2:
                 )
                 mapped[name] = value.model_dump(by_alias=True, exclude_none=True, mode='json')
             else:
-                mapped[name] = value
+                # Dev UI lists a model name. A stored ModelRef is an object;
+                # only the name is JSON-serializable here.
+                mapped[name] = value.name if isinstance(value, ModelRef) else value
         await self.send_response(sid, {'values': mapped})
 
     def handle_configure(self, params: dict[str, Any]) -> None:
