@@ -34,7 +34,7 @@ Example:
 
     # 2. Generate content using any discovered Gemini model
     response = await ai.generate(
-        model='googleai/gemini-flash-latest',
+        model=GoogleAI.gemini_model('gemini-flash-latest'),
         prompt='Suggest 3 names for a space-themed coffee shop.',
     )
 
@@ -58,14 +58,15 @@ from google.auth.credentials import Credentials
 from google.auth.exceptions import DefaultCredentialsError
 from google.genai.client import DebugConfig
 from google.genai.types import HttpOptions, HttpOptionsDict
+from pydantic import BaseModel
 
 import genkit_google_genai.constants as const
 from genkit import ModelInfo
 from genkit._core._action import ActionRunContext
 from genkit._core._model import ModelRequest, ModelResponse
-from genkit.embedder import EmbedderRef, embedder_action_metadata
+from genkit.embedder import EmbedderRef, embedder, embedder_action_metadata
 from genkit.evaluator import EvalFnResponse, EvalRequest
-from genkit.model import BackgroundAction, ModelRef, Operation, model_action_metadata
+from genkit.model import BackgroundAction, ModelRef, Operation, background_model, model, model_action_metadata
 from genkit.plugin_api import (
     GENKIT_CLIENT_HEADER,
     Action,
@@ -87,7 +88,7 @@ from genkit_google_genai.models._routing import is_unroutable_model_id
 from genkit_google_genai.models.embedder import (
     VERTEX_KNOWN_EMBEDDERS,
     Embedder,
-    get_embedder_options,
+    get_embedder_info,
 )
 from genkit_google_genai.models.gemini import (
     SUPPORTED_MODELS,
@@ -117,7 +118,8 @@ from genkit_google_genai.models.imagen import (
     vertexai_image_model_info,
 )
 from genkit_google_genai.models.veo import (
-    VeoConfigSchema,
+    KnownVeo,
+    VeoConfig,
     VeoModel,
     is_veo_model,
     veo_model_info,
@@ -268,12 +270,12 @@ def _new_gemini(plugin: GoogleAI | VertexAI, clean_name: str) -> GeminiModel:
     )
 
 
-def _model_action(name: str, fn: Callable[..., Any], model_info: ModelInfo, config_schema: type) -> Action:
+def _model_action(name: str, fn: Callable[..., Any], model_info: ModelInfo, config_schema: type[BaseModel]) -> Action:
     """Build a MODEL Action with family-specific request typing on ``fn``."""
-    return Action(
-        kind=ActionKind.MODEL,
-        name=name,
-        fn=fn,
+    return model(
+        name,
+        fn,
+        config_schema=config_schema,
         metadata=model_action_metadata(
             name=name,
             info=model_info.model_dump(by_alias=True),
@@ -324,13 +326,10 @@ def _create_embedder_action(
     clean_name = name.replace(f'{plugin_name}/', '') if name.startswith(plugin_name) else name
     full_name = f'{plugin_name}/{clean_name}'
     label = f'{PLUGIN_DISPLAY_NAME[plugin_name]} - {clean_name}'
-    action_metadata = embedder_action_metadata(
-        name=full_name,
-        options=get_embedder_options(
-            name=clean_name,
-            label=label,
-            is_vertex=(plugin_name == VERTEXAI_PLUGIN_NAME),
-        ),
+    embed_info = get_embedder_info(
+        name=clean_name,
+        label=label,
+        is_vertex=(plugin_name == VERTEXAI_PLUGIN_NAME),
     )
 
     async def _run(request: Any) -> Any:  # noqa: ANN401
@@ -341,18 +340,7 @@ def _create_embedder_action(
         )
         return await embedder.generate(request)
 
-    action = Action(
-        kind=ActionKind.EMBEDDER,
-        name=full_name,
-        fn=_run,
-        metadata=action_metadata.metadata,
-    )
-
-    # Explicitly set schemas (no 'if' needed as they are always present in metadata)
-    action.input_schema = action_metadata.input_json_schema  # type: ignore[invalid-assignment]
-    action.output_schema = action_metadata.output_json_schema  # type: ignore[invalid-assignment]
-
-    return action
+    return embedder(full_name, _run, info=embed_info)
 
 
 def _create_veo_background_action(
@@ -378,43 +366,22 @@ def _create_veo_background_action(
     prefix = f'{plugin_name}/'
     clean_name = name.removeprefix(prefix)
     full_name = f'{prefix}{clean_name}'
-    action_key = f'/background-model/{full_name}'
 
-    async def _start(request: ModelRequest[VeoConfigSchema], ctx: ActionRunContext) -> Operation:
+    async def _start(request: ModelRequest[VeoConfig], ctx: ActionRunContext) -> Operation:
         veo = VeoModel(clean_name, client_getter())
-        op = await veo.start(request, ctx)
-        op.action = action_key
-        return op
+        return await veo.start(request, ctx)
 
-    async def _check(op: Operation, _ctx: ActionRunContext) -> Operation:
+    async def _check(op: Operation) -> Operation:
         veo = VeoModel(clean_name, client_getter())
-        updated = await veo.check(op)
-        updated.action = action_key
-        return updated
+        return await veo.check(op)
 
-    info = veo_model_info(clean_name).model_dump(by_alias=True)
-
-    start_action = Action(
-        kind=ActionKind.BACKGROUND_MODEL,
-        name=full_name,
-        fn=_start,
-        metadata={
-            'model': {**info, 'customOptions': to_json_schema(VeoConfigSchema)},
-            'type': 'background-model',
-        },
-    )
-
-    check_action = Action(
-        kind=ActionKind.CHECK_OPERATION,
-        name=f'{full_name}/check',
-        fn=_check,
-        metadata={'type': 'check-operation'},
-    )
-
-    return BackgroundAction(
-        start_action=start_action,
-        check_action=check_action,
-        cancel_action=None,
+    return background_model(
+        full_name,
+        _start,
+        _check,
+        config_schema=VeoConfig,
+        info=veo_model_info(clean_name),
+        metadata={'type': 'background-model'},
     )
 
 
@@ -509,6 +476,19 @@ class GoogleFamilyRefs:
         )
 
     @classmethod
+    def veo_model(cls, name: KnownVeo | str, *, config: VeoConfig | None = None) -> ModelRef[VeoConfig]:
+        """Typed ref for a Veo video model (``veo-…``)."""
+        return family_model_ref(
+            name,
+            namespace=cls.name,
+            plugin_class=cls.__name__,
+            family='veo',
+            method='veo_model',
+            config_schema=VeoConfig,
+            config=config,
+        )
+
+    @classmethod
     def embedding(
         cls, name: str, *, config: dict[str, object] | None = None, version: str | None = None
     ) -> EmbedderRef:
@@ -531,12 +511,12 @@ def _veo_background_action_metadata(name: str) -> ActionMetadata:
     return ActionMetadata(
         action_type=ActionKind.BACKGROUND_MODEL,
         name=name,
-        input_json_schema=to_json_schema(ModelRequest[VeoConfigSchema]),
+        input_json_schema=to_json_schema(ModelRequest[VeoConfig]),
         output_json_schema=to_json_schema(Operation),
         metadata={
             'model': {
                 **veo_model_info(local).model_dump(by_alias=True),
-                'customOptions': to_json_schema(VeoConfigSchema),
+                'customOptions': to_json_schema(VeoConfig),
             },
             'type': 'background-model',
         },
@@ -555,8 +535,8 @@ class GoogleAI(GoogleFamilyRefs, Plugin):
         |---|---|---|
         | Gemini / Gemma | MODEL | ``googleai/gemini-flash-latest`` |
         | Imagen | MODEL | ``googleai/imagen-3.0-generate-002`` |
-        | Embedders | EMBEDDER | ``googleai/text-embedding-004`` |
-        | Veo (Video) | BACKGROUND_MODEL | ``googleai/veo-2.0-generate-001`` |
+        | Embedders | EMBEDDER | ``googleai/gemini-embedding-001`` |
+        | Veo (Video) | BACKGROUND_MODEL | ``googleai/veo-3.1-generate-preview`` |
 
     Example:
         ```python
@@ -568,7 +548,7 @@ class GoogleAI(GoogleFamilyRefs, Plugin):
 
         # 2. Generate text using Gemini Flash
         res = await ai.generate(
-            model='googleai/gemini-flash-latest',
+            model=GoogleAI.gemini_model('gemini-flash-latest'),
             prompt='Explain quantum computing in one sentence.',
         )
 
@@ -862,7 +842,7 @@ class GoogleAI(GoogleFamilyRefs, Plugin):
             actions_list.append(
                 embedder_action_metadata(
                     name=googleai_name(name),
-                    options=get_embedder_options(
+                    info=get_embedder_info(
                         name=name,
                         label=f'{PLUGIN_DISPLAY_NAME[GOOGLEAI_PLUGIN_NAME]} - {name}',
                     ),
@@ -893,7 +873,7 @@ class VertexAI(GoogleFamilyRefs, Plugin):
         |---|---|---|
         | Gemini / Gemma | MODEL | ``vertexai/gemini-flash-latest`` |
         | Imagen | MODEL | ``vertexai/imagen-3.0-generate-002`` |
-        | Veo (Video) | BACKGROUND_MODEL | ``vertexai/veo-2.0-generate-001`` |
+        | Veo (Video) | BACKGROUND_MODEL | ``vertexai/veo-3.1-generate-preview`` |
         | Embedders | EMBEDDER | ``vertexai/text-embedding-005`` |
 
     Example:
@@ -906,7 +886,7 @@ class VertexAI(GoogleFamilyRefs, Plugin):
 
         # 2. Generate text using Gemini on Vertex AI
         res = await ai.generate(
-            model='vertexai/gemini-flash-latest',
+            model=VertexAI.gemini_model('gemini-flash-latest'),
             prompt='Explain quantum computing in one sentence.',
         )
 
@@ -1296,7 +1276,7 @@ class VertexAI(GoogleFamilyRefs, Plugin):
             actions_list.append(
                 embedder_action_metadata(
                     name=vertexai_name(name),
-                    options=get_embedder_options(
+                    info=get_embedder_info(
                         name=name,
                         label=f'{PLUGIN_DISPLAY_NAME[VERTEXAI_PLUGIN_NAME]} - {name}',
                         is_vertex=True,

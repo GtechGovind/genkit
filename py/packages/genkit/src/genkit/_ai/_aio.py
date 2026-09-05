@@ -29,7 +29,7 @@ import threading
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from pathlib import Path
-from typing import Any, TypeVar, cast, overload
+from typing import Any, TypeVar, overload
 
 import anyio
 import uvicorn
@@ -44,7 +44,7 @@ from genkit._ai._agents._base import (
 from genkit._ai._agents._runtime import AgentFn
 from genkit._ai._agents._session import SessionStore, StateT, get_current_session
 from genkit._ai._agents._types import ChunkTransform, StateTransform
-from genkit._ai._embedding import EmbedderFn, EmbedderOptions, EmbedderRef, define_embedder
+from genkit._ai._embedding import EmbedderFn, EmbedderInfo, EmbedderRef, define_embedder
 from genkit._ai._evaluator import (
     BatchEvaluatorFn,
     EvaluatorFn,
@@ -66,8 +66,9 @@ from genkit._ai._model import (
     ModelFn,
     ModelResponse,
     ModelResponseChunk,
+    assert_correct_config_class,
     define_model,
-    resolve_call_model,
+    resolve_for_generate,
 )
 from genkit._ai._prompt import (
     ExecutablePrompt,
@@ -92,9 +93,10 @@ from genkit._core._background import (
     CancelModelOpFn,
     CheckModelOpFn,
     StartModelOpFn,
+    cancel_operation,
     check_operation,
     define_background_model,
-    lookup_background_action,
+    missing_operation_error,
 )
 from genkit._core._channel import Channel, run_loop
 from genkit._core._dap import (
@@ -147,25 +149,29 @@ T = TypeVar('T')
 MiddlewareT = TypeVar('MiddlewareT', bound=BaseMiddleware)
 
 
-def _model_supports_long_running(model_action: Action) -> bool:
-    """Check if a model action supports long-running operations."""
-    model_info = model_action.metadata.get('model') if model_action.metadata else None
-    if not model_info:
-        return False
-    # Handle ModelInfo object
-    if hasattr(model_info, 'supports'):
-        supports = getattr(model_info, 'supports', None)
-        return bool(getattr(supports, 'long_running', False)) if supports else False
-    # Handle dict (cast needed because isinstance narrows too much for type checkers)
-    if isinstance(model_info, dict):
-        model_dict = cast(dict[str, Any], model_info)
-        supports = model_dict.get('supports')
-        return bool(supports.get('longRunning', False)) if isinstance(supports, dict) else False
-    return False
-
-
 class Genkit:
-    """Genkit asyncio user-facing API."""
+    """The main entry point for building AI-powered applications.
+
+    Registers plugins, defines flows, tools, and agents, and runs generation.
+
+    Example:
+        from genkit import Genkit
+        from genkit_google_genai import GoogleAI
+
+        ai = Genkit(plugins=[GoogleAI()], model=GoogleAI.gemini_model('gemini-flash-latest'))
+
+        @ai.tool()
+        async def current_weather(city: str) -> str:
+            return f'Sunny in {city}'
+
+        @ai.flow()
+        async def my_flow(prompt: str) -> str:
+            res = await ai.generate(prompt=prompt, tools=['current_weather'])
+            return res.text
+
+        if __name__ == '__main__':
+            ai.run_main(my_flow('Weather in Paris?'))
+    """
 
     def __init__(
         self,
@@ -242,14 +248,20 @@ class Genkit:
                 the returned Action will be typed as Action[InputT, OutputT, ChunkT].
 
         Example:
+            from genkit import Genkit
+            from genkit_google_genai import GoogleAI
+
+            ai = Genkit(plugins=[GoogleAI()], model=GoogleAI.gemini_model('gemini-flash-latest'))
+
             @ai.flow()
-            async def my_flow(x: str) -> int: ...  # Action[str, int]
+            async def my_flow(prompt: str) -> str:
+                res = await ai.generate(prompt=prompt)
+                return res.text
 
             @ai.flow(chunk_type=str)
             async def streaming_flow(x: int, ctx: ActionRunContext) -> str:
-                ctx.send_chunk("progress")
-                return "done"
-            # Action[int, str, str]
+                ctx.send_chunk('progress')
+                return 'done'
         """
         if chunk_type is not None:
             return _FlowDecoratorWithChunk(self.registry, name, description, chunk_type)
@@ -293,7 +305,15 @@ class Genkit:
         )
 
     def tool(self, name: str | None = None, description: str | None = None) -> Callable[[Callable[..., Any]], Tool]:
-        """Decorator to register a function as a tool."""
+        """Decorator to register a function as a tool.
+
+        Example:
+            @ai.tool()
+            async def current_weather(city: str) -> str:
+                return f'Sunny in {city}'
+
+            res = await ai.generate(prompt='Weather in Paris?', tools=['current_weather'])
+        """
 
         def wrapper(func: Callable[..., Any]) -> Tool:
             return define_tool(self.registry, func, name, description)
@@ -452,12 +472,12 @@ class Genkit:
         self,
         name: str,
         fn: EmbedderFn,
-        options: EmbedderOptions | None = None,
+        info: EmbedderInfo | None = None,
         metadata: dict[str, object] | None = None,
         description: str | None = None,
     ) -> Action:
         """Register a custom embedder action."""
-        return define_embedder(self.registry, name, fn, options, metadata, description)
+        return define_embedder(self.registry, name, fn, info, metadata, description)
 
     def define_format(self, format: FormatDef) -> None:
         """Register a custom output format."""
@@ -708,7 +728,13 @@ class Genkit:
         input_schema: type | dict[str, object] | str | None = None,
         output_schema: type | dict[str, object] | str | None = None,
     ) -> ExecutablePrompt[Any, Any]:
-        """Register a prompt template."""
+        """Register a prompt template.
+
+        Example:
+            joke = ai.define_prompt(name='joke', prompt='Tell a joke about {{topic}}.')
+            res = await joke(input={'topic': 'cats'})
+            print(res.text)
+        """
         executable_prompt = ExecutablePrompt(
             self.registry,
             variant=variant,
@@ -909,6 +935,20 @@ class Genkit:
         Pass ``state_schema`` (a Pydantic model) to type the custom state tools
         read and write — the chat's ``state``, ``response.state``, and streamed
         ``chunk.custom`` come back as that model instead of a dict.
+
+        Example:
+            from genkit.agent import InMemorySessionStore
+            from genkit_google_genai import GoogleAI
+
+            agent = ai.define_agent(
+                name='weatherAgent',
+                model=GoogleAI.gemini_model('gemini-flash-latest'),
+                system='Weather assistant.',
+                tools=[current_weather],
+                store=InMemorySessionStore(),
+            )
+            chat = agent.chat()
+            res = await chat.send('Weather in Paris?')
         """
         return define_agent(
             registry=self.registry,
@@ -1264,13 +1304,29 @@ class Genkit:
         ``tools`` is typed as ``Sequence`` rather than ``list`` because ``Sequence``
         is covariant: ``list[Tool]`` or ``list[str]`` are both assignable to
         ``Sequence[str | Tool]``, but not to ``list[str | Tool]``.
+
+        Example:
+            from pydantic import BaseModel
+
+            class Weather(BaseModel):
+                city: str
+                forecast: str
+
+            res = await ai.generate(
+                prompt='Weather in Paris?',
+                tools=['current_weather'],
+                output_schema=Weather,
+            )
+            print(res.text)
+            print(res.output)
         """
         # One call-scoped registry layer holds anything inline (tools +
         # middleware) so it dies with the call and stays out of self.registry.
         child_registry = self.registry.new_child()
         await register_tools(child_registry, tools)
         refs = register_middleware(child_registry, use)
-        resolved = resolve_call_model(model=model, config=config, registry=child_registry)
+        resolved = await resolve_for_generate(model=model, config=config, registry=child_registry)
+        assert_correct_config_class(config=config, schema=resolved.config_schema, model=resolved.name)
         prompt_config = PromptConfig(
             model=resolved.name,
             prompt=prompt,
@@ -1436,7 +1492,14 @@ class Genkit:
         docs: list[Document] | None = None,
         timeout: float | None = None,
     ) -> ModelStreamResponse[Any]:
-        """Stream generated text, returning a ModelStreamResponse with .stream and .response."""
+        """Stream generated text, returning a ModelStreamResponse with .stream and .response.
+
+        Example:
+            stream = ai.generate_stream(prompt='Write a haiku about rain.')
+            async for chunk in stream.stream:
+                print(chunk.text)
+            final = await stream.response
+        """
         channel: Channel[ModelResponseChunk, ModelResponse[Any]] = Channel(timeout=timeout)
 
         async def _run_generate() -> ModelResponse[Any]:
@@ -1445,7 +1508,8 @@ class Genkit:
             child_registry = self.registry.new_child()
             await register_tools(child_registry, tools)
             refs = register_middleware(child_registry, use)
-            resolved = resolve_call_model(model=model, config=config, registry=child_registry)
+            resolved = await resolve_for_generate(model=model, config=config, registry=child_registry)
+            assert_correct_config_class(config=config, schema=resolved.config_schema, model=resolved.name)
             prompt_config = PromptConfig(
                 model=resolved.name,
                 prompt=prompt,
@@ -1488,7 +1552,17 @@ class Genkit:
         metadata: dict[str, object] | None = None,
         options: dict[str, object] | None = None,
     ) -> list[Embedding]:
-        """Generate vector embeddings for a single document or string."""
+        """Generate vector embeddings for a single document or string.
+
+        Example:
+            from genkit_google_genai import GoogleAI
+
+            embeddings = await ai.embed(
+                embedder=GoogleAI.embedding('gemini-embedding-001'),
+                content='Hello world',
+            )
+            vector = embeddings[0].embedding
+        """
         embedder_name = self._resolve_embedder_name(embedder)
         embedder_config: dict[str, object] = {}
 
@@ -1554,7 +1628,17 @@ class Genkit:
         options: dict[str, object] | None = None,
         eval_run_id: str | None = None,
     ) -> EvalResponse:
-        """Evaluate a dataset using the specified evaluator."""
+        """Evaluate a dataset using the specified evaluator.
+
+        Example:
+            from genkit.evaluator import BaseDataPoint
+
+            results = await ai.evaluate(
+                evaluator='my_eval',
+                dataset=[BaseDataPoint(input='What is 2+2?', output='4')],
+            )
+            print(results.root[0].evaluation.score)
+        """
         evaluator_name: str = ''
         evaluator_config: dict[str, object] = {}
 
@@ -1633,14 +1717,7 @@ class Genkit:
 
     async def cancel_operation(self, operation: Operation) -> Operation:
         """Cancel a long-running background operation."""
-        if not operation.action:
-            raise ValueError('Provided operation is missing original request information')
-
-        background_action = await lookup_background_action(self.registry, operation.action)
-        if background_action is None:
-            raise ValueError(f'Failed to resolve background action from original request: {operation.action}')
-
-        return await background_action.cancel(operation)
+        return await cancel_operation(self.registry, operation)
 
     @overload
     async def generate_operation(
@@ -1709,13 +1786,23 @@ class Genkit:
         use: Sequence[BaseMiddleware | MiddlewareRef] | None = None,
         docs: list[Document] | None = None,
     ) -> Operation:
-        """Generate content using a long-running model, returning an Operation to poll."""
-        resolved = resolve_call_model(
+        """Generate content using a long-running model, returning an Operation to poll.
+
+        Example:
+            op = await ai.generate_operation(
+                model='googleai/veo-3.1-generate-preview',
+                prompt='A timelapse of a flower blooming.',
+            )
+            while not op.done:
+                op = await ai.check_operation(op)
+        """
+        resolved = await resolve_for_generate(
             model=model,
             config=config,
             registry=self.registry,
             message='No model specified for generate_operation.',
         )
+        assert_correct_config_class(config=config, schema=resolved.config_schema, model=resolved.name)
 
         model_action = await self.registry.resolve_model(resolved.name)
         if not model_action:
@@ -1724,8 +1811,7 @@ class Genkit:
                 message=f"Model '{resolved.name}' not found.",
             )
 
-        # Check if model supports long-running operations
-        if not _model_supports_long_running(model_action):
+        if model_action.kind != ActionKind.BACKGROUND_MODEL:
             raise GenkitError(
                 status='INVALID_ARGUMENT',
                 message=f"Model '{model_action.name}' does not support long running operations.",
@@ -1752,11 +1838,7 @@ class Genkit:
             docs=docs,
         )
 
-        # Extract operation from response
-        if not hasattr(response, 'operation') or not response.operation:
-            raise GenkitError(
-                status='FAILED_PRECONDITION',
-                message=f"Model '{model_action.name}' did not return an operation.",
-            )
+        if not response.operation:
+            raise missing_operation_error(name=model_action.name)
 
         return response.operation

@@ -268,6 +268,18 @@ class Registry:
                 self._entries[action.kind] = {}
             self._entries[action.kind][action.name] = action
 
+    def registered_action(self, kind: ActionKind, name: str) -> Action | None:
+        """Return an action that is already in this registry.
+
+        Does not initialize plugins or run resolve. Falls back to the parent
+        registry.
+        """
+        with self._lock:
+            local = self._entries.get(kind, {}).get(name)
+        if local is not None:
+            return local
+        return self._parent.registered_action(kind, name) if self._parent is not None else None
+
     async def resolve_actions_by_kind(self, kind: ActionKind) -> dict[str, Action]:
         """Returns all registered actions for a specific kind, triggering lazy loading.
 
@@ -757,15 +769,24 @@ class Registry:
         return cast(Action[EmbedRequest, EmbedResponse, Never], action)
 
     async def resolve_model(self, name: str) -> Action[ModelRequest, ModelResponse, ModelResponseChunk] | None:
-        """Resolve a model action by name with full type information.
+        """Resolve a model action by name.
+
+        Looks up a normal model first, then a background start action, so a
+        name registered only with ``define_background_model`` is findable
+        under the same string callers already pass.
 
         Args:
             name: The model name (e.g., "gemini-pro" or "plugin/model").
 
         Returns:
-            A fully typed model action, or None if not found.
+            The MODEL action, or the BACKGROUND_MODEL start action, or None.
         """
         action = await self.resolve_action(ActionKind.MODEL, name)
+        if action is None:
+            # Models registered with define_background_model live under this
+            # kind. Callers still pass the same name they would for a normal
+            # model.
+            action = await self.resolve_action(ActionKind.BACKGROUND_MODEL, name)
         if action is None:
             return None
         return cast(

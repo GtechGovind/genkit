@@ -1883,6 +1883,9 @@ func (c *ModelResponseChunk) Text() string {
 	}
 	var sb strings.Builder
 	for _, p := range c.Content {
+		// Data parts are deliberately excluded: their payload lives on Data (not
+		// Text), so they contribute no text (e.g. A2UI envelope JSON must not
+		// leak into Text()).
 		if p.IsText() {
 			sb.WriteString(p.Text)
 		}
@@ -2019,13 +2022,17 @@ func (m *Message) Text() string {
 	// Single-part messages are the common case and skip the builder, but they
 	// are still filtered: a lone media part is not this message's text.
 	if len(m.Content) == 1 {
-		if p := m.Content[0]; p.IsText() {
-			return p.Text
+		// Fast path only applies to a text part; a lone data part carries its
+		// payload on Data (not Text) and must not be returned as message text.
+		if m.Content[0].IsText() {
+			return m.Content[0].Text
 		}
-		return ""
 	}
 	var sb strings.Builder
 	for _, p := range m.Content {
+		// Data parts are deliberately excluded: their payload lives on Data (not
+		// Text), so they contribute no text (e.g. A2UI envelope JSON must not
+		// leak into Text()).
 		if p.IsText() {
 			sb.WriteString(p.Text)
 		}

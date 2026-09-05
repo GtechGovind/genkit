@@ -33,7 +33,7 @@ Example:
 
     # 2. Generate content using dynamic model discovery
     res = await ai.generate(
-        model='googleai/gemini-flash-latest',
+        model=GoogleAI.gemini_model('gemini-flash-latest'),
         prompt='Suggest 2 catchy names for a space coffee shop.',
     )
 
@@ -54,7 +54,7 @@ Example:
 
     # 2. Generate content with Gemini Pro on Vertex AI
     res = await ai.generate(
-        model='vertexai/gemini-pro-latest',
+        model=VertexAI.gemini_model('gemini-pro-latest'),
         prompt='Explain quantum entanglement in one sentence.',
     )
 
@@ -95,7 +95,7 @@ from genkit_google_genai.models.gemini import (
 )
 from genkit_google_genai.models.imagen import ImagenConfigSchema, ImagenVersion, KnownImagen
 from genkit_google_genai.models.lyria import LyriaConfig, LyriaVersion
-from genkit_google_genai.models.veo import VeoConfig, VeoVersion
+from genkit_google_genai.models.veo import KnownVeo, VeoConfig, VeoVersion
 
 
 def package_name() -> str:
@@ -123,6 +123,7 @@ __all__ = [
     'KnownGeminiTts',
     'KnownGemma',
     'KnownImagen',
+    'KnownVeo',
     'LyriaConfig',
     'LyriaVersion',
     'VeoConfig',

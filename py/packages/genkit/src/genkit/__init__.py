@@ -14,7 +14,29 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Genkit — Build AI-powered applications."""
+"""Genkit — production-ready SDK for AI-powered applications.
+
+Build AI agents with structured generation, tool calling, streaming, and
+observability. Register plugins, define flows and tools, and run generation.
+
+Example:
+    from genkit import Genkit
+    from genkit_google_genai import GoogleAI
+
+    ai = Genkit(plugins=[GoogleAI()], model=GoogleAI.gemini_model('gemini-flash-latest'))
+
+    @ai.tool()
+    async def current_weather(city: str) -> str:
+        return f'Sunny in {city}'
+
+    @ai.flow()
+    async def my_flow(prompt: str) -> str:
+        res = await ai.generate(prompt=prompt, tools=['current_weather'])
+        return res.text
+
+    if __name__ == '__main__':
+        ai.run_main(my_flow('Weather in Paris?'))
+"""
 
 from genkit._ai._aio import ActionKind, Genkit
 from genkit._ai._prompt import (
@@ -55,7 +77,7 @@ from genkit._core._typing import (
 
 # Import embedder-related types from the embedder namespace
 from genkit.embedder import (
-    EmbedderOptions,
+    EmbedderInfo,
     EmbedderRef,
     Embedding,
     EmbedRequest,
@@ -76,6 +98,7 @@ from genkit.model import (
     Stage,
     Supports,
     ToolDefinition,
+    background_model,
 )
 
 # Flow is an alias for Action (used in samples for flow type hints)
@@ -90,7 +113,7 @@ __all__ = [
     'StreamResponse',
     'EmbedRequest',
     'EmbedResponse',
-    'EmbedderOptions',
+    'EmbedderInfo',
     'EmbedderRef',
     'ModelConfigDict',
     'ModelInfo',
@@ -105,6 +128,7 @@ __all__ = [
     'respond_to_interrupt',
     'restart_tool',
     'tool',
+    'background_model',
     # Content types
     'Constrained',
     'CustomPart',
